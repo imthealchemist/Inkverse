@@ -11,6 +11,23 @@ node server.js          # → http://localhost:3000
 No dependencies required (Node 18+). Data persists in `db.json` (auto-seeded on first run).
 To reset all data: delete `db.json` and restart.
 
+## Deploying to Railway
+
+The app is Railway-ready out of the box (reads `$PORT`, binds `0.0.0.0`, zero build step).
+
+1. **New Project → Deploy from GitHub repo** → select this repository.
+2. Railway auto-detects Node. Set **Start Command**: `node server.js` (leave Build Command empty).
+3. **Important — persistence:** Railway's filesystem is ephemeral. Without a volume, all
+   accounts/novels reset on every deploy. Add one:
+   - Service → **Settings → Volumes → Mount Volume** → mount path `/data`
+   - **Variables** → add `DB_PATH=/data/db.json`
+4. **Settings → Networking → Generate Domain** to get your public URL.
+
+On first boot the demo dataset (incl. the admin account) is seeded automatically.
+
+> The same works on Render/Fly/Koyeb: any host that runs `node server.js` with a
+> persistent volume + `DB_PATH` env var.
+
 ## Demo accounts (password for all: `demo123`)
 
 | Role | Email | What to try |

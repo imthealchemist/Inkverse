@@ -11,7 +11,9 @@ const crypto = require('crypto');
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
 const PUB = path.join(ROOT, 'public');
-const DB_PATH = path.join(ROOT, 'db.json');
+/* On ephemeral hosts (Railway, Render…) point DB_PATH at a mounted volume,
+   e.g. DB_PATH=/data/db.json, so data survives restarts/redeploys. */
+const DB_PATH = process.env.DB_PATH || path.join(ROOT, 'db.json');
 
 /* ---------------- datastore ---------------- */
 let db;
