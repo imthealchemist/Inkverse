@@ -17,7 +17,8 @@ To reset all data: delete `db.json` and restart.
 |---|---|---|
 | 📖 Reader | `reader@demo.app` | Home feed, bookmarks, reading history, follow writers |
 | ✍️ Verified Writer | `writer@demo.app` | Writer dashboard, create novels, rich-text chapter editor, drafts → publish |
-| 🛡️ Admin | `admin@demo.app` | Admin panel: users, verification requests, novels, chapters, genres, reports |
+
+> An admin account is also seeded. Its credentials are intentionally **not** published here — ask the maintainer for them.
 
 ## Feature map
 
