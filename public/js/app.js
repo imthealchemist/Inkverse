@@ -98,7 +98,7 @@ function openDrawer() {
     if (u.role === 'admin') items += link(I.shield, 'Admin Panel', '#/admin');
     items += `<button class="menu-item danger-l" data-action="logout">${I.logout}<span>Log out</span></button>`;
   }
-  $('#drawer-root').innerHTML = `<div class="drawer-back" data-action="drawer-close"><div class="drawer" onclick="event.stopPropagation()">
+  $('#drawer-root').innerHTML = `<div class="drawer-back"><div class="drawer">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="brand"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 5c2.5-1.6 5-1.6 8 0 3-1.6 5.5-1.6 8 0v13c-2.5-1.6-5-1.6-8 0-3-1.6-5.5-1.6-8 0z" fill="#8b5cf6"/></svg><span style="font-size:16px">Ink<b>Verse</b></span></span>
     <button class="icon-btn" data-action="drawer-close">${I.x}</button></div>${userBlock}${items}</div></div>`;
 }
@@ -113,7 +113,7 @@ function toast(msg, type) {
   toastTimer = setTimeout(() => $('#toast').innerHTML = '', 2800);
 }
 function openModal(title, bodyHtml) {
-  $('#modal-root').innerHTML = `<div class="modal-back" data-action="modal-close"><div class="modal" onclick="event.stopPropagation()">
+  $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal">
     <div class="modal-h"><h3>${title}</h3><button class="icon-btn" data-action="modal-close">${I.x}</button></div>
     <div class="modal-b">${bodyHtml}</div></div></div>`;
 }
@@ -752,6 +752,10 @@ async function adminReports(box) {
 
 /* ================= ACTIONS ================= */
 document.addEventListener('click', async e => {
+  // Backdrop clicks: close only when the click lands on the backdrop itself,
+  // never when it lands on modal/drawer content.
+  const back = e.target.closest('.modal-back, .drawer-back');
+  if (back && e.target === back) { closeModal(); closeDrawer(); return; }
   const el = e.target.closest('[data-action]');
   if (!el) {
     const am = e.target.closest('[data-authmode]');
