@@ -1,6 +1,7 @@
 #!/bin/bash
 # InkVerse API smoke test
-B=http://localhost:3000/api
+BASE=${BASE:-http://localhost:3000}
+B=$BASE/api
 j() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d$1)" 2>/dev/null; }
 pass=0; fail=0
 chk(){ if [ "$2" = "$3" ]; then pass=$((pass+1)); else fail=$((fail+1)); echo "FAIL: $1 (got '$2', want '$3')"; fi }
@@ -84,8 +85,8 @@ chk "admin feature novel" "$(curl -s -X PUT $B/admin/novels/$NNID -H "Authorizat
 
 # 12. cleanup test artifacts
 curl -s -X DELETE $B/novels/$NNID -H "Authorization: Bearer $AT" > /dev/null
-chk "static index" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/)" "200"
-chk "static cover" "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/covers/c1.jpg)" "200"
+chk "static index" "$(curl -s -o /dev/null -w '%{http_code}' $BASE/)" "200"
+chk "static cover" "$(curl -s -o /dev/null -w '%{http_code}' $BASE/covers/c1.jpg)" "200"
 
 echo ""
 echo "RESULT: $pass passed, $fail failed"

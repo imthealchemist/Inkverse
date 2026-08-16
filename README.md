@@ -8,25 +8,38 @@ A modern, **mobile-first novel reading & publishing platform** (MVP).
 node server.js          # → http://localhost:3000
 ```
 
-No dependencies required (Node 18+). Data persists in `db.json` (auto-seeded on first run).
-To reset all data: delete `db.json` and restart.
+Requires Node 18+ (`npm install` once — single dependency: `pg`).
+Data persists in `db.json` locally, or in PostgreSQL when `DATABASE_URL` is set
+(auto-seeded on first run either way). To reset local data: delete `db.json` and restart.
 
-## Deploying to Railway
+## Storage backends
+
+InkVerse auto-selects its datastore at startup:
+
+| Environment | Storage | How |
+|---|---|---|
+| No `DATABASE_URL` | `db.json` file | zero-config, ideal for local dev |
+| `DATABASE_URL` set | **PostgreSQL** | recommended for production (e.g. free Neon.tech DB on Railway) |
+
+On first boot an empty database is seeded with the demo library automatically.
+PostgreSQL restarts/redeploys never lose data.
+
+## Deploying: Railway (host) + Neon (free database)
 
 The app is Railway-ready out of the box (reads `$PORT`, binds `0.0.0.0`, zero build step).
 
-1. **New Project → Deploy from GitHub repo** → select this repository.
-2. Railway auto-detects Node. Set **Start Command**: `node server.js` (leave Build Command empty).
-3. **Important — persistence:** Railway's filesystem is ephemeral. Without a volume, all
-   accounts/novels reset on every deploy. Add one:
-   - Service → **Settings → Volumes → Mount Volume** → mount path `/data`
-   - **Variables** → add `DB_PATH=/data/db.json`
-4. **Settings → Networking → Generate Domain** to get your public URL.
+1. **Neon** — sign up free at https://neon.tech → create a project → copy the
+   connection string (Dashboard → *Connect*).
+2. **Railway** — New Project → Deploy from GitHub repo → select this repository.
+   Start Command: `node server.js` (no build command needed).
+3. **Railway → Variables** → add `DATABASE_URL` = your Neon connection string.
+4. **Settings → Networking → Generate Domain** for your public URL.
 
-On first boot the demo dataset (incl. the admin account) is seeded automatically.
+That's it — stories posted by any user are stored in Neon and visible to everyone,
+surviving every restart and redeploy.
 
-> The same works on Render/Fly/Koyeb: any host that runs `node server.js` with a
-> persistent volume + `DB_PATH` env var.
+> Alternative (no external DB): mount a Railway Volume at `/data` and set
+> `DB_PATH=/data/db.json` to persist the JSON file instead.
 
 ## Demo accounts (password for all: `demo123`)
 
@@ -67,9 +80,9 @@ On first boot the demo dataset (incl. the admin account) is seeded automatically
 ## Architecture
 
 ```
-server.js   zero-dependency HTTP server: static files + REST API (/api/*)
+server.js   HTTP server: static files + REST API (/api/*); JSON file or PostgreSQL datastore
 seed.js     demo dataset (users, novels, chapters, follows, reports…)
-db.json     JSON datastore (created automatically)
+db.json     local JSON datastore (created automatically when DATABASE_URL is absent)
 public/     SPA frontend (hash router, vanilla JS — no build step)
 ```
 

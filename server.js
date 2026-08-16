@@ -15,14 +15,79 @@ const PUB = path.join(ROOT, 'public');
    e.g. DB_PATH=/data/db.json, so data survives restarts/redeploys. */
 const DB_PATH = process.env.DB_PATH || path.join(ROOT, 'db.json');
 
-/* ---------------- datastore ---------------- */
+/* ---------------- datastore ----------------
+   Two backends:
+   - JSON file (default, zero-config — great for local dev)
+   - PostgreSQL when DATABASE_URL is set (Railway + Neon, production)
+   All route handlers work against the same in-memory `db` object either way. */
+const USE_PG = !!process.env.DATABASE_URL;
+const COLLECTIONS = ['users', 'sessions', 'genres', 'novels', 'chapters', 'bookmarks', 'history', 'follows', 'verifications', 'reports'];
 let db;
-function saveDB() { fs.writeFileSync(DB_PATH, JSON.stringify(db)); }
+let pgPool = null;
+let persistChain = Promise.resolve();
+
+function saveDB() {
+  if (!USE_PG) { fs.writeFileSync(DB_PATH, JSON.stringify(db)); return; }
+  // Serialize writes so concurrent saves never interleave.
+  persistChain = persistChain.then(persistAll).catch(e => console.error('[db] persist error:', e.message));
+}
+
 function loadDB() {
   if (fs.existsSync(DB_PATH)) { db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); return; }
   db = require('./seed').build();
   saveDB();
   console.log('[seed] fresh database created');
+}
+
+/* ---- PostgreSQL backend ---- */
+function rowsOf(c) {
+  if (c === 'sessions') return Object.entries(db.sessions).map(([token, userId]) => ({ id: token, data: { token, userId } }));
+  if (c === 'bookmarks') return db.bookmarks.map(b => ({ id: b.userId + ':' + b.novelId, data: b }));
+  if (c === 'history') return db.history.map(h => ({ id: h.userId + ':' + h.novelId, data: h }));
+  if (c === 'follows') return db.follows.map(f => ({ id: f.followerId + ':' + f.authorId, data: f }));
+  return db[c].map(x => ({ id: x.id, data: x }));
+}
+
+async function persistAll() {
+  const client = await pgPool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const c of COLLECTIONS) {
+      await client.query('DELETE FROM "' + c + '"');
+      for (const r of rowsOf(c)) {
+        await client.query('INSERT INTO "' + c + '" (id, data) VALUES ($1, $2)', [r.id, JSON.stringify(r.data)]);
+      }
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) { /* ignore */ }
+    throw e;
+  } finally { client.release(); }
+}
+
+async function initPG() {
+  const { Pool } = require('pg');
+  const ssl = process.env.PGSSLMODE === 'disable' ? undefined : { rejectUnauthorized: false };
+  pgPool = new Pool({ connectionString: process.env.DATABASE_URL, ssl, max: 5 });
+  await pgPool.query('SELECT 1'); // fail fast if unreachable
+  for (const c of COLLECTIONS) {
+    await pgPool.query('CREATE TABLE IF NOT EXISTS "' + c + '" (id TEXT PRIMARY KEY, data JSONB NOT NULL)');
+  }
+  db = { sessions: {} };
+  for (const c of COLLECTIONS) {
+    if (c === 'sessions') continue;
+    const r = await pgPool.query('SELECT data FROM "' + c + '"');
+    db[c] = r.rows.map(x => x.data);
+  }
+  const s = await pgPool.query('SELECT data FROM "sessions"');
+  s.rows.forEach(x => { db.sessions[x.data.token] = x.data.userId; });
+  if (!db.users.length) {
+    db = require('./seed').build();
+    await persistAll();
+    console.log('[seed] seeded PostgreSQL with demo data');
+  } else {
+    console.log('[db] loaded from PostgreSQL: ' + db.users.length + ' users, ' + db.novels.length + ' novels, ' + db.chapters.length + ' chapters');
+  }
 }
 const uid = () => crypto.randomBytes(8).toString('hex');
 const now = () => new Date().toISOString();
@@ -573,5 +638,22 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-loadDB();
-server.listen(PORT, '0.0.0.0', () => console.log(`InkVerse running on http://0.0.0.0:${PORT}`));
+async function boot() {
+  try {
+    if (USE_PG) await initPG();
+    else loadDB();
+  } catch (e) {
+    console.error('[db] failed to initialize datastore:', e.message);
+    process.exit(1);
+  }
+  server.listen(PORT, '0.0.0.0', () =>
+    console.log(`InkVerse running on http://0.0.0.0:${PORT} (storage: ${USE_PG ? 'PostgreSQL' : 'JSON file'})`));
+}
+
+/* Graceful shutdown: flush pending writes before Railway kills the process */
+['SIGINT', 'SIGTERM'].forEach(sig => process.on(sig, async () => {
+  try { await persistChain; if (pgPool) await pgPool.end(); } catch (_) { /* ignore */ }
+  process.exit(0);
+}));
+
+boot();
