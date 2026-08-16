@@ -1,0 +1,575 @@
+#!/usr/bin/env node
+/* InkVerse — novel reading & publishing platform (MVP)
+   Zero-dependency Node.js server: static files + REST API + JSON datastore.
+   Architecture note: the datastore layer (db object + saveDB) is isolated so it
+   can be swapped for a real DB (Postgres/Mongo) later without touching routes. */
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+
+const PORT = process.env.PORT || 3000;
+const ROOT = __dirname;
+const PUB = path.join(ROOT, 'public');
+const DB_PATH = path.join(ROOT, 'db.json');
+
+/* ---------------- datastore ---------------- */
+let db;
+function saveDB() { fs.writeFileSync(DB_PATH, JSON.stringify(db)); }
+function loadDB() {
+  if (fs.existsSync(DB_PATH)) { db = JSON.parse(fs.readFileSync(DB_PATH, 'utf8')); return; }
+  db = require('./seed').build();
+  saveDB();
+  console.log('[seed] fresh database created');
+}
+const uid = () => crypto.randomBytes(8).toString('hex');
+const now = () => new Date().toISOString();
+const hashPw = (pw, salt) => crypto.scryptSync(String(pw), salt, 64).toString('hex');
+const stripTags = (html) => String(html || '').replace(/<[^>]*>/g, ' ');
+const wordCount = (html) => stripTags(html).split(/\s+/).filter(Boolean).length;
+
+/* ---------------- helpers ---------------- */
+function httpError(code, msg) { const e = new Error(msg); e.code = code; return e; }
+function json(res, code, obj) {
+  const b = JSON.stringify(obj);
+  res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(b);
+}
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on('data', c => {
+      size += c.length;
+      if (size > 12 * 1024 * 1024) { reject(httpError(413, 'Payload too large')); req.destroy(); }
+      else chunks.push(c);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      if (!raw) return resolve({});
+      try { resolve(JSON.parse(raw)); } catch (e) { reject(httpError(400, 'Invalid JSON body')); }
+    });
+    req.on('error', reject);
+  });
+}
+function bearer(req) {
+  const h = req.headers['authorization'] || '';
+  return h.startsWith('Bearer ') ? h.slice(7) : null;
+}
+function userOf(req) {
+  const t = bearer(req);
+  if (!t || !db.sessions[t]) return null;
+  return db.users.find(u => u.id === db.sessions[t]) || null;
+}
+function publicUser(u) {
+  return { id: u.id, name: u.name, email: u.email, role: u.role, verified: !!u.verified, bio: u.bio || '', banned: !!u.banned, joinedAt: u.joinedAt, avatarColor: u.avatarColor };
+}
+function followerCount(userId) { return db.follows.filter(f => f.authorId === userId).length; }
+function followingCount(userId) { return db.follows.filter(f => f.followerId === userId).length; }
+
+function novelById(id) { return db.novels.find(n => n.id === id); }
+function userById(id) { return db.users.find(u => u.id === id); }
+function chapterById(id) { return db.chapters.find(c => c.id === id); }
+
+function enrichNovel(n, viewer) {
+  const author = userById(n.authorId);
+  const chs = db.chapters.filter(c => c.novelId === n.id && c.status === 'published');
+  const lastCh = db.chapters.filter(c => c.novelId === n.id && c.status === 'published').sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
+  return {
+    id: n.id, title: n.title, description: n.description, genres: n.genres, cover: n.cover,
+    status: n.status, featured: !!n.featured, createdAt: n.createdAt,
+    views: n.views || 0, wordCount: chs.reduce((s, c) => s + c.wordCount, 0),
+    chapterCount: chs.length, latestChapterAt: lastCh ? lastCh.updatedAt : n.createdAt,
+    authorId: n.authorId,
+    authorName: author ? author.name : 'Unknown', authorVerified: author ? !!author.verified : false,
+    bookmarked: viewer ? db.bookmarks.some(b => b.userId === viewer.id && b.novelId === n.id) : false
+  };
+}
+
+function recommend(user, limit = 8) {
+  const hist = db.history.filter(h => h.userId === user.id).map(h => h.novelId);
+  const bm = db.bookmarks.filter(b => b.userId === user.id).map(b => b.novelId);
+  const ids = [...new Set([...hist, ...bm])];
+  const score = {};
+  ids.forEach(id => { const n = novelById(id); if (n) n.genres.forEach(g => score[g] = (score[g] || 0) + 1); });
+  const hasSignal = Object.keys(score).length > 0;
+  return db.novels.filter(n => n.status === 'published')
+    .map(n => ({ n, s: (hasSignal ? n.genres.reduce((a, g) => a + (score[g] || 0), 0) * 10 : 0) + Math.log((n.views || 0) + 1) }))
+    .sort((a, b) => b.s - a.s)
+    .slice(0, limit)
+    .map(x => x.n);
+}
+
+function canManageNovel(user, novel) {
+  return user && (user.role === 'admin' || novel.authorId === user.id);
+}
+
+/* ---------------- router ---------------- */
+const routes = [];
+function route(method, pattern, handler, opts = {}) {
+  routes.push({ method, re: new RegExp('^' + pattern + '$'), handler, opts });
+}
+
+/* ---- auth ---- */
+route('POST', '/api/auth/signup', ({ res, body }) => {
+  const name = String(body.name || '').trim();
+  const email = String(body.email || '').trim().toLowerCase();
+  const password = String(body.password || '');
+  if (name.length < 2) throw httpError(400, 'Please enter your name');
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw httpError(400, 'Please enter a valid email');
+  if (password.length < 6) throw httpError(400, 'Password must be at least 6 characters');
+  if (db.users.some(u => u.email === email)) throw httpError(409, 'An account with this email already exists');
+  const salt = crypto.randomBytes(8).toString('hex');
+  const colors = ['#8b5cf6', '#f59e0b', '#22c55e', '#3b82f6', '#ec4899', '#14b8a6', '#f97316', '#e11d48', '#06b6d4', '#a3e635'];
+  const u = { id: uid(), name, email, salt, passHash: hashPw(password, salt), role: 'reader', verified: false, bio: '', banned: false, joinedAt: now(), avatarColor: colors[Math.floor(Math.random() * colors.length)] };
+  db.users.push(u);
+  const token = crypto.randomBytes(24).toString('hex');
+  db.sessions[token] = u.id;
+  saveDB();
+  json(res, 200, { token, user: publicUser(u) });
+});
+
+route('POST', '/api/auth/login', ({ res, body }) => {
+  const email = String(body.email || '').trim().toLowerCase();
+  const u = db.users.find(x => x.email === email);
+  if (!u || u.passHash !== hashPw(String(body.password || ''), u.salt)) throw httpError(401, 'Invalid email or password');
+  if (u.banned) throw httpError(403, 'This account has been suspended');
+  const token = crypto.randomBytes(24).toString('hex');
+  db.sessions[token] = u.id;
+  saveDB();
+  json(res, 200, { token, user: publicUser(u) });
+});
+
+route('POST', '/api/auth/logout', ({ res, req }, ) => {
+  const t = bearer(req);
+  if (t) { delete db.sessions[t]; saveDB(); }
+  json(res, 200, { ok: true });
+}, { auth: true });
+
+route('GET', '/api/auth/me', ({ res, user }) => {
+  const pending = db.verifications.find(v => v.userId === user.id && v.status === 'pending');
+  json(res, 200, { user: publicUser(user), followers: followerCount(user.id), following: followingCount(user.id), verificationPending: !!pending });
+}, { auth: true });
+
+route('PUT', '/api/me', ({ res, body, user }) => {
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (name.length < 2) throw httpError(400, 'Name too short');
+    user.name = name;
+  }
+  if (body.bio !== undefined) user.bio = String(body.bio).slice(0, 500);
+  saveDB();
+  json(res, 200, { user: publicUser(user) });
+}, { auth: true });
+
+/* ---- meta ---- */
+route('GET', '/api/genres', ({ res }) => json(res, 200, { genres: db.genres }));
+
+/* ---- users / follow ---- */
+route('GET', '/api/users/(?<id>[^/]+)', ({ res, params, user }) => {
+  const target = userById(params.id);
+  if (!target) throw httpError(404, 'User not found');
+  const novels = db.novels.filter(n => n.authorId === target.id && n.status === 'published').map(n => enrichNovel(n, user));
+  json(res, 200, {
+    user: { id: target.id, name: target.name, role: target.role, verified: !!target.verified, bio: target.bio, joinedAt: target.joinedAt, avatarColor: target.avatarColor },
+    followers: followerCount(target.id), followingCount: followingCount(target.id),
+    isFollowing: user ? db.follows.some(f => f.followerId === user.id && f.authorId === target.id) : false,
+    novels
+  });
+});
+
+route('POST', '/api/users/(?<id>[^/]+)/follow', ({ res, params, user }) => {
+  if (params.id === user.id) throw httpError(400, 'You cannot follow yourself');
+  if (!userById(params.id)) throw httpError(404, 'User not found');
+  const i = db.follows.findIndex(f => f.followerId === user.id && f.authorId === params.id);
+  if (i >= 0) db.follows.splice(i, 1); else db.follows.push({ followerId: user.id, authorId: params.id, at: now() });
+  saveDB();
+  json(res, 200, { following: i < 0, followers: followerCount(params.id) });
+}, { auth: true });
+
+/* ---- novels ---- */
+route('GET', '/api/novels/home', ({ res, user }) => {
+  const pub = db.novels.filter(n => n.status === 'published');
+  const featured = pub.filter(n => n.featured).map(n => enrichNovel(n, user));
+  const latest = [...pub].sort((a, b) => {
+    const la = Math.max(a.createdAt, ...(db.chapters.filter(c => c.novelId === a.id && c.status === 'published').map(c => c.updatedAt)));
+    const lb = Math.max(b.createdAt, ...(db.chapters.filter(c => c.novelId === b.id && c.status === 'published').map(c => c.updatedAt)));
+    return String(lb).localeCompare(String(la));
+  }).slice(0, 10).map(n => enrichNovel(n, user));
+  const rec = recommend(user || { id: '__anon__' }, 8).map(n => enrichNovel(n, user));
+  const counts = {};
+  pub.forEach(n => n.genres.forEach(g => counts[g] = (counts[g] || 0) + 1));
+  json(res, 200, { featured, latest, recommended: rec, genreCounts: counts });
+});
+
+route('GET', '/api/novels', ({ res, query, user }) => {
+  let list = db.novels.filter(n => n.status === 'published');
+  const q = (query.get('q') || '').trim().toLowerCase();
+  const genre = query.get('genre');
+  const author = query.get('author');
+  const sort = query.get('sort') || 'popular';
+  if (genre) list = list.filter(n => n.genres.some(g => g.toLowerCase() === genre.toLowerCase()));
+  if (author) list = list.filter(n => n.authorId === author);
+  if (q) list = list.filter(n => {
+    const a = userById(n.authorId);
+    return n.title.toLowerCase().includes(q) || (a && a.name.toLowerCase().includes(q)) || n.genres.some(g => g.toLowerCase().includes(q));
+  });
+  const enriched = list.map(n => enrichNovel(n, user));
+  if (sort === 'newest') enriched.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  else if (sort === 'updated') enriched.sort((a, b) => b.latestChapterAt.localeCompare(a.latestChapterAt));
+  else enriched.sort((a, b) => b.views - a.views);
+  json(res, 200, { novels: enriched.slice(0, 60) });
+});
+
+route('GET', '/api/novels/(?<id>[^/]+)', ({ res, params, user }) => {
+  const n = novelById(params.id);
+  if (!n) throw httpError(404, 'Novel not found');
+  n.views = (n.views || 0) + 1; saveDB();
+  const owner = canManageNovel(user, n);
+  let chs = db.chapters.filter(c => c.novelId === n.id).sort((a, b) => a.order - b.order);
+  if (!owner) chs = chs.filter(c => c.status === 'published');
+  const author = userById(n.authorId);
+  json(res, 200, {
+    novel: enrichNovel(n, user),
+    author: author ? { id: author.id, name: author.name, verified: !!author.verified, bio: author.bio, avatarColor: author.avatarColor, followers: followerCount(author.id) } : null,
+    isFollowingAuthor: user && author ? db.follows.some(f => f.followerId === user.id && f.authorId === author.id) : false,
+    chapters: chs.map(c => ({ id: c.id, title: c.title, status: c.status, order: c.order, updatedAt: c.updatedAt, wordCount: c.wordCount })),
+    history: user ? (db.history.find(h => h.userId === user.id && h.novelId === n.id) || null) : null
+  });
+});
+
+route('POST', '/api/novels', ({ res, body, user }) => {
+  const title = String(body.title || '').trim();
+  if (title.length < 2) throw httpError(400, 'Title is required');
+  const genres = Array.isArray(body.genres) ? body.genres.map(g => String(g).trim()).filter(Boolean).slice(0, 5) : [];
+  const n = {
+    id: uid(), authorId: user.id, title,
+    description: String(body.description || '').slice(0, 2000),
+    genres, cover: body.cover ? String(body.cover).slice(0, 400000) : '',
+    status: 'published', featured: false, views: 0, createdAt: now()
+  };
+  db.novels.push(n); saveDB();
+  json(res, 200, { novel: enrichNovel(n, user) });
+}, { writer: true });
+
+function putNovelHandler({ res, params, body, user }) {
+  const n = novelById(params.id);
+  if (!n) throw httpError(404, 'Novel not found');
+  if (!canManageNovel(user, n)) throw httpError(403, 'Not allowed');
+  if (body.title !== undefined) { const t = String(body.title).trim(); if (t.length < 2) throw httpError(400, 'Title too short'); n.title = t; }
+  if (body.description !== undefined) n.description = String(body.description).slice(0, 2000);
+  if (body.genres !== undefined && Array.isArray(body.genres)) n.genres = body.genres.map(g => String(g).trim()).filter(Boolean).slice(0, 5);
+  if (body.cover !== undefined) n.cover = String(body.cover).slice(0, 400000);
+  if (user.role === 'admin') {
+    if (body.featured !== undefined) n.featured = !!body.featured;
+    if (body.status !== undefined && ['published', 'hidden'].includes(body.status)) n.status = body.status;
+  }
+  saveDB();
+  json(res, 200, { novel: enrichNovel(n, user) });
+}
+function deleteNovelHandler({ res, params, user }) {
+  const n = novelById(params.id);
+  if (!n) throw httpError(404, 'Novel not found');
+  if (!canManageNovel(user, n)) throw httpError(403, 'Not allowed');
+  db.novels = db.novels.filter(x => x.id !== n.id);
+  db.chapters = db.chapters.filter(c => c.novelId !== n.id);
+  db.bookmarks = db.bookmarks.filter(b => b.novelId !== n.id);
+  db.history = db.history.filter(h => h.novelId !== n.id);
+  db.reports = db.reports.filter(r => !(r.targetId === n.id));
+  saveDB();
+  json(res, 200, { ok: true });
+}
+route('PUT', '/api/novels/(?<id>[^/]+)', putNovelHandler, { auth: true });
+route('DELETE', '/api/novels/(?<id>[^/]+)', deleteNovelHandler, { auth: true });
+route('PUT', '/api/admin/novels/(?<id>[^/]+)', putNovelHandler, { admin: true });
+route('DELETE', '/api/admin/novels/(?<id>[^/]+)', deleteNovelHandler, { admin: true });
+
+route('POST', '/api/novels/(?<id>[^/]+)/bookmark', ({ res, params, user }) => {
+  if (!novelById(params.id)) throw httpError(404, 'Novel not found');
+  const i = db.bookmarks.findIndex(b => b.userId === user.id && b.novelId === params.id);
+  if (i >= 0) db.bookmarks.splice(i, 1); else db.bookmarks.push({ userId: user.id, novelId: params.id, at: now() });
+  saveDB();
+  json(res, 200, { bookmarked: i < 0 });
+}, { auth: true });
+
+/* ---- chapters ---- */
+route('GET', '/api/chapters/(?<id>[^/]+)', ({ res, params, user }) => {
+  const c = chapterById(params.id);
+  if (!c) throw httpError(404, 'Chapter not found');
+  const n = novelById(c.novelId);
+  if (!n) throw httpError(404, 'Novel not found');
+  const owner = canManageNovel(user, n);
+  if (c.status !== 'published' && !owner) throw httpError(403, 'This chapter is not published');
+  const pub = db.chapters.filter(x => x.novelId === n.id && x.status === 'published').sort((a, b) => a.order - b.order);
+  const idx = pub.findIndex(x => x.id === c.id);
+  json(res, 200, {
+    chapter: { id: c.id, novelId: c.novelId, title: c.title, content: c.content, status: c.status, order: c.order, updatedAt: c.updatedAt, wordCount: c.wordCount },
+    novel: { id: n.id, title: n.title, cover: n.cover, authorId: n.authorId },
+    prev: idx > 0 ? { id: pub[idx - 1].id, title: pub[idx - 1].title } : null,
+    next: idx >= 0 && idx < pub.length - 1 ? { id: pub[idx + 1].id, title: pub[idx + 1].title } : null,
+    chapters: pub.map((x, i) => ({ id: x.id, title: x.title, num: i + 1 })),
+    num: idx + 1, total: pub.length, canEdit: owner
+  });
+});
+
+route('POST', '/api/novels/(?<id>[^/]+)/chapters', ({ res, params, body, user }) => {
+  const n = novelById(params.id);
+  if (!n) throw httpError(404, 'Novel not found');
+  if (n.authorId !== user.id && user.role !== 'admin') throw httpError(403, 'Not allowed');
+  const title = String(body.title || '').trim();
+  if (!title) throw httpError(400, 'Chapter title is required');
+  const maxOrder = db.chapters.filter(c => c.novelId === n.id).reduce((m, c) => Math.max(m, c.order), 0);
+  const content = String(body.content || '');
+  const c = {
+    id: uid(), novelId: n.id, title, content,
+    status: body.status === 'published' ? 'published' : 'draft',
+    order: maxOrder + 1, createdAt: now(), updatedAt: now(), wordCount: wordCount(content)
+  };
+  db.chapters.push(c); saveDB();
+  json(res, 200, { chapter: { id: c.id, title: c.title, status: c.status, order: c.order, wordCount: c.wordCount } });
+}, { writer: true });
+
+route('PUT', '/api/chapters/(?<id>[^/]+)', ({ res, params, body, user }) => {
+  const c = chapterById(params.id);
+  if (!c) throw httpError(404, 'Chapter not found');
+  const n = novelById(c.novelId);
+  if (!canManageNovel(user, n)) throw httpError(403, 'Not allowed');
+  if (body.title !== undefined) { const t = String(body.title).trim(); if (!t) throw httpError(400, 'Title required'); c.title = t; }
+  if (body.content !== undefined) { c.content = String(body.content); c.wordCount = wordCount(c.content); }
+  if (body.status !== undefined && ['draft', 'published'].includes(body.status)) c.status = body.status;
+  c.updatedAt = now();
+  saveDB();
+  json(res, 200, { chapter: { id: c.id, title: c.title, status: c.status, wordCount: c.wordCount } });
+}, { auth: true });
+
+function deleteChapterHandler({ res, params, user }) {
+  const c = chapterById(params.id);
+  if (!c) throw httpError(404, 'Chapter not found');
+  const n = novelById(c.novelId);
+  if (!canManageNovel(user, n)) throw httpError(403, 'Not allowed');
+  db.chapters = db.chapters.filter(x => x.id !== c.id);
+  db.history = db.history.filter(h => h.chapterId !== c.id);
+  saveDB();
+  json(res, 200, { ok: true });
+}
+route('DELETE', '/api/chapters/(?<id>[^/]+)', deleteChapterHandler, { auth: true });
+route('DELETE', '/api/admin/chapters/(?<id>[^/]+)', deleteChapterHandler, { admin: true });
+
+/* ---- library / history ---- */
+route('GET', '/api/me/library', ({ res, user }) => {
+  const bookmarks = db.bookmarks.filter(b => b.userId === user.id).sort((a, b) => b.at.localeCompare(a.at))
+    .map(b => { const n = novelById(b.novelId); return n ? { ...enrichNovel(n, user), bookmarkedAt: b.at } : null; }).filter(Boolean);
+  const history = db.history.filter(h => h.userId === user.id).sort((a, b) => b.at.localeCompare(a.at))
+    .map(h => {
+      const n = novelById(h.novelId); const c = chapterById(h.chapterId);
+      if (!n) return null;
+      const pub = db.chapters.filter(x => x.novelId === n.id && x.status === 'published').sort((a, b) => a.order - b.order);
+      const num = c ? pub.findIndex(x => x.id === c.id) + 1 : 0;
+      return { novel: enrichNovel(n, user), chapterId: h.chapterId, chapterTitle: c ? c.title : 'Unknown chapter', chapterNum: num, totalChapters: pub.length, at: h.at };
+    }).filter(Boolean);
+  json(res, 200, { bookmarks, history });
+}, { auth: true });
+
+route('POST', '/api/me/history', ({ res, body, user }) => {
+  const { novelId, chapterId } = body;
+  if (!novelById(novelId) || !chapterById(chapterId)) throw httpError(404, 'Not found');
+  db.history = db.history.filter(h => !(h.userId === user.id && h.novelId === novelId));
+  db.history.push({ userId: user.id, novelId, chapterId, at: now() });
+  saveDB();
+  json(res, 200, { ok: true });
+}, { auth: true });
+
+route('GET', '/api/me/following', ({ res, user }) => {
+  const list = db.follows.filter(f => f.followerId === user.id)
+    .map(f => { const u = userById(f.authorId); return u ? { ...publicUser(u), followers: followerCount(u.id), novelCount: db.novels.filter(n => n.authorId === u.id && n.status === 'published').length } : null; })
+    .filter(Boolean);
+  json(res, 200, { following: list });
+}, { auth: true });
+
+/* ---- writer ---- */
+route('POST', '/api/writer/join', ({ res, user }) => {
+  if (user.role === 'reader') { user.role = 'writer'; saveDB(); }
+  json(res, 200, { user: publicUser(user) });
+}, { auth: true });
+
+route('POST', '/api/writer/verification', ({ res, body, user }) => {
+  if (user.role === 'admin') throw httpError(400, 'Admins cannot request verification');
+  if (user.verified) throw httpError(400, 'Already verified');
+  if (db.verifications.some(v => v.userId === user.id && v.status === 'pending')) throw httpError(400, 'A request is already pending');
+  db.verifications.push({ id: uid(), userId: user.id, message: String(body.message || '').slice(0, 1000), status: 'pending', at: now() });
+  saveDB();
+  json(res, 200, { ok: true });
+}, { auth: true });
+
+/* ---- reports ---- */
+route('POST', '/api/reports', ({ res, body, user }) => {
+  const { type, targetId, reason } = body;
+  if (!['novel', 'chapter'].includes(type) || !targetId) throw httpError(400, 'Invalid report');
+  if (type === 'novel' && !novelById(targetId)) throw httpError(404, 'Novel not found');
+  if (type === 'chapter' && !chapterById(targetId)) throw httpError(404, 'Chapter not found');
+  db.reports.push({ id: uid(), reporterId: user.id, type, targetId, reason: String(reason || 'No details given').slice(0, 1000), status: 'open', at: now() });
+  saveDB();
+  json(res, 200, { ok: true });
+}, { auth: true });
+
+/* ---- admin ---- */
+route('GET', '/api/admin/overview', ({ res }) => {
+  json(res, 200, {
+    users: db.users.length,
+    writers: db.users.filter(u => u.role === 'writer').length,
+    novels: db.novels.length,
+    chapters: db.chapters.length,
+    openReports: db.reports.filter(r => r.status === 'open').length,
+    pendingVerifications: db.verifications.filter(v => v.status === 'pending').length,
+    totalViews: db.novels.reduce((s, n) => s + (n.views || 0), 0)
+  });
+}, { admin: true });
+
+route('GET', '/api/admin/users', ({ res, query }) => {
+  const q = (query.get('q') || '').toLowerCase();
+  let list = [...db.users].sort((a, b) => b.joinedAt.localeCompare(a.joinedAt));
+  if (q) list = list.filter(u => u.name.toLowerCase().includes(q) || u.email.includes(q));
+  json(res, 200, { users: list.map(u => ({ ...publicUser(u), followers: followerCount(u.id), novelCount: db.novels.filter(n => n.authorId === u.id).length })) });
+}, { admin: true });
+
+route('PUT', '/api/admin/users/(?<id>[^/]+)', ({ res, params, body, user }) => {
+  const t = userById(params.id);
+  if (!t) throw httpError(404, 'User not found');
+  if (t.id === user.id && (body.role !== undefined || body.banned)) throw httpError(400, 'You cannot change your own role or ban yourself');
+  if (body.role !== undefined && ['reader', 'writer', 'admin'].includes(body.role)) t.role = body.role;
+  if (body.banned !== undefined) t.banned = !!body.banned;
+  if (body.verified !== undefined) t.verified = !!body.verified;
+  saveDB();
+  json(res, 200, { user: publicUser(t) });
+}, { admin: true });
+
+route('GET', '/api/admin/verifications', ({ res }) => {
+  const list = [...db.verifications].sort((a, b) => (a.status === 'pending' ? -1 : 1) - (b.status === 'pending' ? -1 : 1) || b.at.localeCompare(a.at))
+    .map(v => { const u = userById(v.userId); return { ...v, userName: u ? u.name : '?', novelCount: db.novels.filter(n => n.authorId === v.userId).length }; });
+  json(res, 200, { requests: list });
+}, { admin: true });
+
+route('POST', '/api/admin/verifications/(?<id>[^/]+)/approve', ({ res, params }) => {
+  const v = db.verifications.find(x => x.id === params.id);
+  if (!v) throw httpError(404, 'Request not found');
+  v.status = 'approved';
+  const u = userById(v.userId);
+  if (u) { u.verified = true; if (u.role === 'reader') u.role = 'writer'; }
+  saveDB();
+  json(res, 200, { ok: true });
+}, { admin: true });
+
+route('POST', '/api/admin/verifications/(?<id>[^/]+)/reject', ({ res, params }) => {
+  const v = db.verifications.find(x => x.id === params.id);
+  if (!v) throw httpError(404, 'Request not found');
+  v.status = 'rejected'; saveDB();
+  json(res, 200, { ok: true });
+}, { admin: true });
+
+route('GET', '/api/admin/novels', ({ res }) => {
+  json(res, 200, { novels: [...db.novels].sort((a, b) => b.createdAt.localeCompare(a.createdAt)).map(n => enrichNovel(n, null)) });
+}, { admin: true });
+
+route('GET', '/api/admin/chapters', ({ res }) => {
+  const list = [...db.chapters].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 100)
+    .map(c => { const n = novelById(c.novelId); return { id: c.id, title: c.title, status: c.status, wordCount: c.wordCount, updatedAt: c.updatedAt, novelId: c.novelId, novelTitle: n ? n.title : '?' }; });
+  json(res, 200, { chapters: list });
+}, { admin: true });
+
+route('GET', '/api/admin/reports', ({ res }) => {
+  const list = [...db.reports].sort((a, b) => (a.status === 'open' ? -1 : 1) - (b.status === 'open' ? -1 : 1) || b.at.localeCompare(a.at))
+    .map(r => {
+      const reporter = userById(r.reporterId);
+      let targetTitle = '?', targetLink = null;
+      if (r.type === 'novel') { const n = novelById(r.targetId); targetTitle = n ? n.title : '(deleted)'; targetLink = n ? '#/novel/' + n.id : null; }
+      else { const c = chapterById(r.targetId); targetTitle = c ? c.title : '(deleted)'; targetLink = c ? '#/novel/' + c.novelId : null; }
+      return { ...r, reporterName: reporter ? reporter.name : '?', targetTitle, targetLink };
+    });
+  json(res, 200, { reports: list });
+}, { admin: true });
+
+route('POST', '/api/admin/reports/(?<id>[^/]+)/resolve', ({ res, params, body }) => {
+  const r = db.reports.find(x => x.id === params.id);
+  if (!r) throw httpError(404, 'Report not found');
+  if (body.action === 'remove') {
+    if (r.type === 'novel') {
+      db.novels = db.novels.filter(n => n.id !== r.targetId);
+      db.chapters = db.chapters.filter(c => c.novelId !== r.targetId);
+      db.bookmarks = db.bookmarks.filter(b => b.novelId !== r.targetId);
+      db.history = db.history.filter(h => h.novelId !== r.targetId);
+    } else {
+      db.chapters = db.chapters.filter(c => c.id !== r.targetId);
+      db.history = db.history.filter(h => h.chapterId !== r.targetId);
+    }
+    r.status = 'removed';
+  } else r.status = 'dismissed';
+  saveDB();
+  json(res, 200, { ok: true });
+}, { admin: true });
+
+route('POST', '/api/admin/genres', ({ res, body }) => {
+  const name = String(body.name || '').trim();
+  if (name.length < 2) throw httpError(400, 'Genre name too short');
+  if (db.genres.some(g => g.name.toLowerCase() === name.toLowerCase())) throw httpError(409, 'Genre already exists');
+  const g = { id: uid(), name };
+  db.genres.push(g); saveDB();
+  json(res, 200, { genre: g });
+}, { admin: true });
+
+route('DELETE', '/api/admin/genres/(?<id>[^/]+)', ({ res, params }) => {
+  db.genres = db.genres.filter(g => g.id !== params.id);
+  saveDB();
+  json(res, 200, { ok: true });
+}, { admin: true });
+
+route('GET', '/api/health', ({ res }) => json(res, 200, { ok: true, name: 'InkVerse', time: now() }));
+
+/* ---------------- static ---------------- */
+const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+function serveStatic(res, pathname) {
+  if (pathname === '/') pathname = '/index.html';
+  const fp = path.normalize(path.join(PUB, pathname));
+  if (!fp.startsWith(PUB)) { res.writeHead(403); return res.end('Forbidden'); }
+  fs.readFile(fp, (err, data) => {
+    if (err) {
+      // SPA fallback
+      fs.readFile(path.join(PUB, 'index.html'), (e2, html) => {
+        if (e2) { res.writeHead(404); return res.end('Not found'); }
+        res.writeHead(200, { 'Content-Type': 'text/html', 'Cache-Control': 'no-cache' });
+        res.end(html);
+      });
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(fp)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+    res.end(data);
+  });
+}
+
+/* ---------------- server ---------------- */
+const server = http.createServer(async (req, res) => {
+  try {
+    const u = new URL(req.url, 'http://localhost');
+    const p = u.pathname;
+    if (p.startsWith('/api/')) {
+      if (req.method === 'OPTIONS') { res.writeHead(204, { 'Access-Control-Allow-Origin': '*' }); return res.end(); }
+      for (const r of routes) {
+        if (r.method !== req.method) continue;
+        const m = p.match(r.re);
+        if (!m) continue;
+        let body = {};
+        if (req.method !== 'GET') body = await readBody(req);
+        const user = userOf(req);
+        if (r.opts.auth && !user) return json(res, 401, { error: 'Please sign in' });
+        if (r.opts.writer && (!user || !(user.role === 'writer' || user.role === 'admin'))) return json(res, 403, { error: 'A writer account is required' });
+        if (r.opts.admin && (!user || user.role !== 'admin')) return json(res, 403, { error: 'Admin access required' });
+        return await r.handler({ res, req, params: m.groups || {}, query: u.searchParams, body, user });
+      }
+      return json(res, 404, { error: 'Endpoint not found' });
+    }
+    return serveStatic(res, p);
+  } catch (e) {
+    return json(res, e.code || 500, { error: e.message || 'Server error' });
+  }
+});
+
+loadDB();
+server.listen(PORT, '0.0.0.0', () => console.log(`InkVerse running on http://0.0.0.0:${PORT}`));
