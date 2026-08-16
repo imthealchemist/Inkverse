@@ -195,11 +195,6 @@ async function vAuth() {
       <div class="field"><label>Password</label><input class="input" name="password" type="password" required minlength="6" placeholder="At least 6 characters" autocomplete="${authMode === 'login' ? 'current-password' : 'new-password'}"></div>
       <button class="btn full" type="submit">${authMode === 'login' ? 'Log in' : 'Create my account'}</button>
     </form>
-    <div class="demo-box"><h4>Try a demo account · password: demo123</h4>
-      <button class="demo-btn" data-demo="reader@demo.app"><b>📖 Reader</b><span>reader@demo.app</span></button>
-      <button class="demo-btn" data-demo="writer@demo.app"><b>✍️ Verified Writer</b><span>writer@demo.app</span></button>
-      <button class="demo-btn" data-demo="admin@demo.app"><b>🛡️ Admin</b><span>admin@demo.app</span></button>
-    </div>
   </div></div>`;
 }
 
@@ -760,17 +755,6 @@ document.addEventListener('click', async e => {
   if (!el) {
     const am = e.target.closest('[data-authmode]');
     if (am) { authMode = am.dataset.authmode; vAuth(); return; }
-    const demo = e.target.closest('[data-demo]');
-    if (demo) {
-      try {
-        const d = await api('/auth/login', { method: 'POST', body: { email: demo.dataset.demo, password: 'demo123' } });
-        App.token = d.token; localStorage.setItem('iv_token', d.token); await loadMe();
-        toast('Welcome, ' + App.user.name.split(' ')[0] + '!', 'ok');
-        const dest = App.pendingRoute && App.pendingRoute !== '#/auth' ? App.pendingRoute : '#/home';
-        App.pendingRoute = null; nav(dest);
-      } catch (err) { toast(err.message, 'error'); }
-      return;
-    }
     const rt = e.target.closest('[data-rtheme]');
     if (rt) { localStorage.setItem('iv_rtheme', rt.dataset.rtheme); const root = $('#reader-root'); if (root) root.className = 'reader ' + rt.dataset.rtheme; readerSettingsModal(); return; }
     const rf = e.target.closest('[data-rfs]');
