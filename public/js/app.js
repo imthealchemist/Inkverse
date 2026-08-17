@@ -1,4 +1,4 @@
-/* ================= InkVerse SPA ================= */
+/* ================= SOLID INK NOVEL SPA ================= */
 'use strict';
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -99,7 +99,7 @@ function openDrawer() {
     items += `<button class="menu-item danger-l" data-action="logout">${I.logout}<span>Log out</span></button>`;
   }
   $('#drawer-root').innerHTML = `<div class="drawer-back"><div class="drawer">
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="brand"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 5c2.5-1.6 5-1.6 8 0 3-1.6 5.5-1.6 8 0v13c-2.5-1.6-5-1.6-8 0-3-1.6-5.5-1.6-8 0z" fill="#8b5cf6"/></svg><span style="font-size:16px">Ink<b>Verse</b></span></span>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px"><span class="brand"><svg viewBox="0 0 24 24" width="20" height="20"><path d="M4 5c2.5-1.6 5-1.6 8 0 3-1.6 5.5-1.6 8 0v13c-2.5-1.6-5-1.6-8 0-3-1.6-5.5-1.6-8 0z" fill="#8b5cf6"/></svg><span style="font-size:15px;letter-spacing:.02em">SOLID INK <b>NOVEL</b></span></span>
     <button class="icon-btn" data-action="drawer-close">${I.x}</button></div>${userBlock}${items}</div></div>`;
 }
 function closeDrawer() { $('#drawer-root').innerHTML = ''; }
@@ -184,7 +184,7 @@ async function vAuth() {
   document.body.classList.add('no-tabbar');
   $('#tabbar').innerHTML = '';
   $('#view').innerHTML = `<div class="page"><div class="auth-wrap">
-    <div class="auth-brand"><div class="big">Ink<b>Verse</b></div><p>Read boldly. Write bravely.<br>Your next favorite story lives here.</p></div>
+    <div class="auth-brand"><div class="big">SOLID INK <b>NOVEL</b></div><p>Read boldly. Write bravely.<br>Your next favorite story lives here.</p></div>
     <div class="auth-tabs">
       <button class="auth-tab ${authMode === 'login' ? 'active' : ''}" data-authmode="login">Log in</button>
       <button class="auth-tab ${authMode === 'signup' ? 'active' : ''}" data-authmode="signup">Create account</button>
@@ -211,7 +211,7 @@ async function vHome() {
       <div class="bt spacer"><b>Have a story to tell?</b><br>Publish chapters, build readers, and get verified.</div>
       <button class="btn sm" data-action="join-writer">Join as a Writer</button></div>` : '';
   $('#view').innerHTML = `<div class="page">
-    <div style="margin-bottom:14px"><div class="muted small">${u ? esc(greet) + ', ' + esc(u.name.split(' ')[0]) + ' 👋' : 'Welcome to InkVerse 👋'}</div>
+    <div style="margin-bottom:14px"><div class="muted small">${u ? esc(greet) + ', ' + esc(u.name.split(' ')[0]) + ' 👋' : 'Welcome to SOLID INK NOVEL 👋'}</div>
     <h1 style="font-size:21px;font-weight:800;letter-spacing:-.02em">What will you read today?</h1></div>
     ${d.featured.length ? `<div class="section-h"><h2>Featured</h2></div>
     <div class="hscroll">${d.featured.map(n => `<a class="hero" href="#/novel/${n.id}">${coverImg(n).replace('class="cover"', 'class=""')}<div class="overlay"></div>
@@ -698,7 +698,7 @@ async function adminVerifications(box) {
   const d = await api('/admin/verifications');
   box.innerHTML = d.requests.length ? d.requests.map(v => `<div class="admin-card">
     <div class="ac-top"><b>${esc(v.userName)}</b><span class="badge ${v.status}">${v.status}</span><span class="spacer"></span><span class="small faint">${timeAgo(v.at)}</span></div>
-    <div class="ac-body">“${esc(v.message || 'No message')}”<br><span class="small faint">${v.novelCount} novels on InkVerse</span></div>
+    <div class="ac-body">“${esc(v.message || 'No message')}”<br><span class="small faint">${v.novelCount} novels on SOLID INK NOVEL</span></div>
     ${v.status === 'pending' ? `<div class="ac-actions">
       <button class="btn sm" data-action="verif-approve" data-id="${v.id}">Approve ✓</button>
       <button class="btn sm ghost" data-action="verif-reject" data-id="${v.id}">Reject</button></div>` : ''}
@@ -850,7 +850,7 @@ document.addEventListener('click', async e => {
     else if (a === 'request-verification') {
       openModal('Request verification', `<p>Verification is reviewed by an admin. Briefly explain why your account should be verified — published works, audience size, external links, etc.</p>
         <form data-form="request-verification">
-        <div class="field"><textarea class="input" name="message" rows="4" required minlength="20" maxlength="1000" placeholder="Why should InkVerse verify you?"></textarea></div>
+        <div class="field"><textarea class="input" name="message" rows="4" required minlength="20" maxlength="1000" placeholder="Why should SOLID INK NOVEL verify you?"></textarea></div>
         <button class="btn full" type="submit">Submit request</button></form>`);
     }
     /* writer */

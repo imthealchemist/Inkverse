@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* InkVerse — novel reading & publishing platform (MVP)
+/* SOLID INK NOVEL — novel reading & publishing platform (MVP)
    Zero-dependency Node.js server: static files + REST API + JSON datastore.
    Architecture note: the datastore layer (db object + saveDB) is isolated so it
    can be swapped for a real DB (Postgres/Mongo) later without touching routes. */
@@ -588,7 +588,7 @@ route('DELETE', '/api/admin/genres/(?<id>[^/]+)', ({ res, params }) => {
   json(res, 200, { ok: true });
 }, { admin: true });
 
-route('GET', '/api/health', ({ res }) => json(res, 200, { ok: true, name: 'InkVerse', time: now() }));
+route('GET', '/api/health', ({ res }) => json(res, 200, { ok: true, name: 'SOLID INK NOVEL', time: now() }));
 
 /* ---------------- static ---------------- */
 const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
@@ -647,7 +647,7 @@ async function boot() {
     process.exit(1);
   }
   server.listen(PORT, '0.0.0.0', () =>
-    console.log(`InkVerse running on http://0.0.0.0:${PORT} (storage: ${USE_PG ? 'PostgreSQL' : 'JSON file'})`));
+    console.log(`SOLID INK NOVEL running on http://0.0.0.0:${PORT} (storage: ${USE_PG ? 'PostgreSQL' : 'JSON file'})`));
 }
 
 /* Graceful shutdown: flush pending writes before Railway kills the process */

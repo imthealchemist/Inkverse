@@ -1,8 +1,8 @@
 {
-  "name": "inkverse",
+  "name": "solid-ink-novel",
   "version": "1.0.0",
   "private": true,
-  "description": "InkVerse — mobile-first novel reading & publishing platform",
+  "description": "SOLID INK NOVEL — mobile-first novel reading & publishing platform",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",

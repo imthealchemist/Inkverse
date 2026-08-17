@@ -1,4 +1,4 @@
-# InkVerse 📖
+# SOLID INK NOVEL 📖
 
 A modern, **mobile-first novel reading & publishing platform** (MVP).
 
@@ -14,7 +14,7 @@ Data persists in `db.json` locally, or in PostgreSQL when `DATABASE_URL` is set
 
 ## Storage backends
 
-InkVerse auto-selects its datastore at startup:
+SOLID INK NOVEL auto-selects its datastore at startup:
 
 | Environment | Storage | How |
 |---|---|---|

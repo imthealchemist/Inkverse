@@ -1,4 +1,4 @@
-/* InkVerse seed data — runs once when db.json doesn't exist yet. */
+/* SOLID INK NOVEL seed data — runs once when db.json doesn't exist yet. */
 const crypto = require('crypto');
 const uid = () => crypto.randomBytes(8).toString('hex');
 const hashPw = (pw, salt) => crypto.scryptSync(String(pw), salt, 64).toString('hex');
@@ -12,17 +12,17 @@ function build() {
     return { id: uid(), name, email, salt, passHash: hashPw('demo123', salt), role, verified, bio, banned: false, joinedAt: joined, avatarColor: color };
   };
 
-  const admin = mkUser('InkVerse Admin', 'admin@demo.app', 'admin', true, 'Keeping InkVerse safe, one story at a time.', '#64748b', daysAgo(400));
-  const ava = mkUser('Ava Sterling', 'ava@inkverse.app', 'writer', true, 'I write about love, loss, and the cities in between. Author of Embers of the Heart.', '#ec4899', daysAgo(380));
-  const tunde = mkUser('Tunde Okafor', 'tunde@inkverse.app', 'writer', true, 'Thrillers, heists, and hard choices. Ex-journalist chasing adrenaline on the page.', '#f97316', daysAgo(350));
-  const lena = mkUser('Lena Marsh', 'lena@inkverse.app', 'writer', false, 'Mystery writer. I believe every lighthouse keeps a secret.', '#06b6d4', daysAgo(290));
-  const kofi = mkUser('Kofi Mensah', 'kofi@inkverse.app', 'writer', false, 'Collector of old myths and older lies.', '#22c55e', daysAgo(320));
-  const rhea = mkUser('Rhea Solberg', 'rhea@inkverse.app', 'writer', false, 'Epic fantasy, one storm at a time.', '#3b82f6', daysAgo(300));
-  const naoki = mkUser('Ito Naoki', 'naoki@inkverse.app', 'writer', true, 'Neon futures and quiet machines.', '#8b5cf6', daysAgo(310));
-  const priya = mkUser('Priya Raman', 'priya@inkverse.app', 'writer', false, 'Comedy, chaos, and the occasional dragon.', '#f59e0b', daysAgo(260));
+  const admin = mkUser('Solid Ink Admin', 'admin@demo.app', 'admin', true, 'Keeping SOLID INK NOVEL safe, one story at a time.', '#64748b', daysAgo(400));
+  const ava = mkUser('Ava Sterling', 'ava@solidink.app', 'writer', true, 'I write about love, loss, and the cities in between. Author of Embers of the Heart.', '#ec4899', daysAgo(380));
+  const tunde = mkUser('Tunde Okafor', 'tunde@solidink.app', 'writer', true, 'Thrillers, heists, and hard choices. Ex-journalist chasing adrenaline on the page.', '#f97316', daysAgo(350));
+  const lena = mkUser('Lena Marsh', 'lena@solidink.app', 'writer', false, 'Mystery writer. I believe every lighthouse keeps a secret.', '#06b6d4', daysAgo(290));
+  const kofi = mkUser('Kofi Mensah', 'kofi@solidink.app', 'writer', false, 'Collector of old myths and older lies.', '#22c55e', daysAgo(320));
+  const rhea = mkUser('Rhea Solberg', 'rhea@solidink.app', 'writer', false, 'Epic fantasy, one storm at a time.', '#3b82f6', daysAgo(300));
+  const naoki = mkUser('Ito Naoki', 'naoki@solidink.app', 'writer', true, 'Neon futures and quiet machines.', '#8b5cf6', daysAgo(310));
+  const priya = mkUser('Priya Raman', 'priya@solidink.app', 'writer', false, 'Comedy, chaos, and the occasional dragon.', '#f59e0b', daysAgo(260));
   const zainab = mkUser('Zainab Bello', 'writer@demo.app', 'writer', true, 'Storyteller from the desert road. Currently writing Sands of the Starless Road.', '#e11d48', daysAgo(280));
   const maya = mkUser('Maya Okon', 'reader@demo.app', 'reader', false, 'Just here for the stories.', '#14b8a6', daysAgo(120));
-  const sam = mkUser('Sam Ede', 'sam@inkverse.app', 'reader', false, 'Weekend reader, professional procrastinator.', '#a3e635', daysAgo(90));
+  const sam = mkUser('Sam Ede', 'sam@solidink.app', 'reader', false, 'Weekend reader, professional procrastinator.', '#a3e635', daysAgo(90));
 
   const users = [admin, ava, tunde, lena, kofi, rhea, naoki, priya, zainab, maya, sam];
 
