@@ -151,6 +151,13 @@ const HTTP_MAIL =
   (EMAIL_PROVIDER === 'resend' && !!process.env.RESEND_API_KEY);
 const SMTP_ENABLED = SMTP_CONSOLE || HTTP_MAIL || !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
 
+/* ---- Google OAuth ("Sign in with Google") ----
+   Secrets (client secret) stay on the backend; the frontend only ever
+   receives our own session token at the end of the flow. */
+const GOOGLE_ENABLED = !!(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+const oauthStates = new Map(); // state -> expiry timestamp
+function pruneStates() { const t = Date.now(); for (const [k, v] of oauthStates) if (v < t) oauthStates.delete(k); }
+
 function parseFrom() {
   const raw = String(process.env.MAIL_FROM || process.env.SMTP_USER || '');
   const m = raw.match(/^([^<]*)<([^>]+)>$/);
@@ -367,7 +374,87 @@ route('PUT', '/api/me', ({ res, body, user }) => {
 }, { auth: true });
 
 /* ---- meta ---- */
-route('GET', '/api/genres', ({ res }) => json(res, 200, { genres: db.genres }));
+route('GET', '/api/genres', ({ res }) => json(res, 200, { genres: db.genres, google: GOOGLE_ENABLED }));
+
+/* ---- Google OAuth routes ---- */
+route('GET', '/api/auth/google', ({ res, req }) => {
+  if (!GOOGLE_ENABLED) throw httpError(400, 'Google sign-in is not configured');
+  pruneStates();
+  const state = crypto.randomBytes(16).toString('hex');
+  oauthStates.set(state, Date.now() + 10 * 60 * 1000);
+  const params = new URLSearchParams({
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    redirect_uri: appOrigin(req) + '/api/auth/google/callback',
+    response_type: 'code',
+    scope: 'openid email profile',
+    state,
+    prompt: 'select_account'
+  });
+  res.writeHead(302, { Location: 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString() });
+  res.end();
+});
+
+route('GET', '/api/auth/google/callback', async ({ res, req, query }) => {
+  const origin = appOrigin(req);
+  const finish = (hash) => { res.writeHead(302, { Location: origin + '/' + hash }); res.end(); };
+  const fail = (msg) => finish('#/auth?gerror=' + encodeURIComponent(msg));
+  try {
+    if (!GOOGLE_ENABLED) return fail('Google sign-in is not configured');
+    const state = String(query.get('state') || '');
+    if (!state || !oauthStates.has(state) || oauthStates.get(state) < Date.now()) return fail('The sign-in session expired — please try again.');
+    oauthStates.delete(state);
+    if (query.get('error')) return fail('Google sign-in was cancelled.');
+    const code = query.get('code');
+    if (!code) return fail('Missing authorization code from Google.');
+
+    // Exchange the code for tokens (server-to-server; client secret never leaves the backend)
+    const tokRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        code,
+        client_id: process.env.GOOGLE_CLIENT_ID,
+        client_secret: process.env.GOOGLE_CLIENT_SECRET,
+        redirect_uri: appOrigin(req) + '/api/auth/google/callback',
+        grant_type: 'authorization_code'
+      })
+    });
+    const tok = await tokRes.json().catch(() => ({}));
+    if (!tokRes.ok || !tok.id_token) { console.error('[oauth] token exchange failed:', tok.error_description || tokRes.status); return fail('Could not complete Google sign-in.'); }
+
+    // Decode + sanity-check the ID token (received directly from Google over TLS)
+    const payload = JSON.parse(Buffer.from(tok.id_token.split('.')[1], 'base64url').toString());
+    if (payload.aud !== process.env.GOOGLE_CLIENT_ID || !['https://accounts.google.com', 'accounts.google.com'].includes(payload.iss)) return fail('Invalid Google token.');
+    if (!payload.email) return fail('This Google account has no email address.');
+
+    const email = String(payload.email).toLowerCase();
+    let u = db.users.find(x => x.email === email);
+    if (!u) {
+      const salt = crypto.randomBytes(8).toString('hex');
+      const colors = ['#8b5cf6', '#f59e0b', '#22c55e', '#3b82f6', '#ec4899', '#14b8a6', '#f97316', '#e11d48', '#06b6d4', '#a3e635'];
+      u = {
+        id: uid(), name: String(payload.name || email.split('@')[0]).slice(0, 60), email, salt,
+        passHash: hashPw(crypto.randomBytes(24).toString('hex'), salt), // random — login is via Google
+        role: 'reader', verified: false, emailVerified: true, bio: '', banned: false,
+        joinedAt: now(), avatarColor: colors[Math.floor(Math.random() * colors.length)],
+        googleId: payload.sub, avatarUrl: payload.picture || ''
+      };
+      db.users.push(u);
+    } else {
+      if (u.banned) return fail('This account has been suspended.');
+      u.googleId = payload.sub; // link Google to the existing account
+      if (payload.picture && !u.avatarUrl) u.avatarUrl = payload.picture;
+      u.emailVerified = true;
+    }
+    const token = crypto.randomBytes(24).toString('hex');
+    db.sessions[token] = u.id;
+    saveDB();
+    finish('#/oauth-done?token=' + token);
+  } catch (e) {
+    console.error('[oauth] google callback error:', e.message);
+    fail('Google sign-in failed — please try again.');
+  }
+});
 
 /* ---- users / follow ---- */
 route('GET', '/api/users/(?<id>[^/]+)', ({ res, params, user }) => {

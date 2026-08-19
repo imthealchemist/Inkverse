@@ -36,6 +36,28 @@ On first boot an empty database is seeded with the demo library automatically.
 Covers are uploaded through the backend (validated: JPG/PNG/WebP, max **5 MB**)
 and stored in Supabase Storage; novels, chapters and user data live in Supabase tables.
 
+## Sign in with Google (recommended — no email deliverability issues)
+
+One-tap sign-up/login: users pick their Google account; Google verifies the
+account, so no confirmation emails are needed. The client secret stays on the
+backend; the browser only ever receives the app's own session token.
+
+Setup (one-time, free, ~5 min):
+
+1. https://console.cloud.google.com → create a project (e.g. `solid-ink-novel`).
+2. **APIs & Services → OAuth consent screen** → External → app name + support email.
+   Add your own Gmail under **Test users**. (Later click **PUBLISH APP** so anyone
+   can sign in — these scopes need no Google review.)
+3. **Credentials → Create credentials → OAuth client ID → Web application**.
+   Under **Authorized redirect URIs** add exactly:
+   `https://YOUR-RAILWAY-DOMAIN/api/auth/google/callback`
+4. Copy the **Client ID** and **Client secret** into Railway variables:
+   `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` → redeploy.
+
+The **Continue with Google** button appears on the login page automatically.
+If an existing account uses the same email, Google sign-in links to it.
+While the consent screen is in *Testing*, only listed test users can log in.
+
 ## Email verification (Gmail-style confirmation links)
 
 When an email provider is configured, new accounts receive a **confirmation link

@@ -218,6 +218,14 @@ select.input{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xml
 .auth-tab{padding:9px;border-radius:9px;font-weight:700;color:var(--muted);font-size:14px}
 .auth-tab.active{background:var(--surface2);color:var(--text)}
 .demo-box{margin-top:18px;padding:14px;border-radius:var(--r);background:rgba(139,92,246,.07);border:1px dashed rgba(139,92,246,.4)}
+
+/* Google sign-in */
+.gbtn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;background:#fff;color:#1f1f1f;border:none;border-radius:12px;padding:12px 16px;font-size:15px;font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.35);cursor:pointer;transition:filter .15s,transform .12s}
+.gbtn:hover{filter:brightness(.96)}
+.gbtn:active{transform:scale(.98)}
+.gbtn svg{width:20px;height:20px;flex:none}
+.or-div{display:flex;align-items:center;gap:12px;color:var(--faint);font-size:12px;margin:16px 0 12px;text-transform:uppercase;letter-spacing:.06em}
+.or-div::before,.or-div::after{content:'';height:1px;background:var(--line);flex:1}
 .demo-box h4{font-size:12.5px;text-transform:uppercase;letter-spacing:.06em;color:#a78bfa;margin-bottom:9px}
 .demo-btn{display:flex;align-items:center;justify-content:space-between;width:100%;padding:9px 11px;border-radius:9px;background:var(--surface);border:1px solid var(--line);margin-bottom:7px;font-size:13px;transition:border-color .15s}
 .demo-btn:hover{border-color:var(--accent)}

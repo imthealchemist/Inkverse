@@ -38,7 +38,7 @@ const I = {
 const vBadge = `<svg class="vbadge" viewBox="0 0 20 20" aria-label="Verified" title="Verified writer"><circle cx="10" cy="10" r="9" fill="#3b82f6"/><path d="M6 10.4l2.4 2.4L14 7.4" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 /* ---------------- api & state ---------------- */
-const App = { token: localStorage.getItem('iv_token') || null, user: null, genres: [], pendingRoute: null, readerState: { novel: null } };
+const App = { token: localStorage.getItem('iv_token') || null, user: null, genres: [], googleOAuth: false, pendingRoute: null, readerState: { novel: null } };
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json' };
@@ -56,7 +56,7 @@ async function api(path, opts = {}) {
   return data;
 }
 async function loadMeta() {
-  try { App.genres = (await api('/genres')).genres; } catch (e) { /* non-fatal */ }
+  try { const d = await api('/genres'); App.genres = d.genres; App.googleOAuth = !!d.google; } catch (e) { /* non-fatal */ }
 }
 async function loadMe() {
   if (!App.token) return;
@@ -186,8 +186,9 @@ async function route() {
     if (r === 'search') return await vSearch(query);
     if (r === 'library') return await guard(() => vLibrary());
     if (r === 'profile') return await guard(() => vProfile());
-    if (r === 'auth') return vAuth();
+    if (r === 'auth') return vAuth(query);
     if (r === 'verify') return await vVerify(query);
+    if (r === 'oauth-done') return await vOauthDone(query);
     if (r === 'author' && seg[1]) return await vAuthor(seg[1]);
     if (r === 'novel' && seg[1]) return await vNovel(seg[1]);
     if (r === 'read' && seg[2]) return await vReader(seg[1], seg[2]);
@@ -213,12 +214,16 @@ function nav(hash) { if (location.hash === hash) route(); else location.hash = h
 
 /* ---------- auth ---------- */
 let authMode = 'login';
-async function vAuth() {
+const GOOGLE_G = `<svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.5 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.2-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.9 1.2 8 3l5.7-5.7C34.5 6.1 29.5 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.3-2.3 4.3-4.1 5.7l6.2 5.2C36.9 39.2 44 34 44 24c0-1.2-.1-2.4-.4-3.5z"/></svg>`;
+async function vAuth(query) {
   if (App.user) { location.hash = '#/home'; return; }
   document.body.classList.add('no-tabbar');
   $('#tabbar').innerHTML = '';
+  const gerror = query && query.get('gerror');
   $('#view').innerHTML = `<div class="page"><div class="auth-wrap">
     <div class="auth-brand"><div class="big">SOLID INK <b>NOVEL</b></div><p>Read boldly. Write bravely.<br>Your next favorite story lives here.</p></div>
+    ${gerror ? `<div class="notice" style="background:rgba(239,68,68,.1);border-color:rgba(239,68,68,.4);color:#fca5a5">${esc(gerror)}</div>` : ''}
+    ${App.googleOAuth ? `<button class="btn gbtn full" data-action="google-signin">${GOOGLE_G} Continue with Google</button><div class="or-div"><span>or with email</span></div>` : ''}
     <div class="auth-tabs">
       <button class="auth-tab ${authMode === 'login' ? 'active' : ''}" data-authmode="login">Log in</button>
       <button class="auth-tab ${authMode === 'signup' ? 'active' : ''}" data-authmode="signup">Create account</button>
@@ -274,6 +279,22 @@ async function vVerify(query) {
       </form>
       <button class="btn ghost full" style="margin-top:8px" data-action="goto" data-href="#/auth">Back to log in</button></div>`;
   }
+}
+
+/* Google OAuth landing — receives our session token from the backend */
+async function vOauthDone(query) {
+  document.body.classList.add('no-tabbar');
+  $('#tabbar').innerHTML = '';
+  const token = query.get('token') || '';
+  if (!token) { location.hash = '#/auth'; return; }
+  App.token = token;
+  localStorage.setItem('iv_token', token);
+  await loadMe();
+  toast('Welcome, ' + (App.user ? App.user.name.split(' ')[0] : 'reader') + '! 👋', 'ok');
+  const dest = App.pendingRoute && !['#/auth', ''].includes(App.pendingRoute) ? App.pendingRoute : '#/home';
+  App.pendingRoute = null;
+  location.replace(dest); // keeps the token out of browser history
+  route();
 }
 
 /* ---------- home ---------- */
@@ -1013,6 +1034,10 @@ document.addEventListener('click', async e => {
     }
     else if (a === 'install-app') {
       if (deferredInstall) { closeDrawer(); deferredInstall.prompt(); deferredInstall = null; }
+    }
+    else if (a === 'google-signin') {
+      App.pendingRoute = location.hash !== '#/auth' ? location.hash : null;
+      location.href = '/api/auth/google';
     }
     else if (a === 'resend-verify') {
       el.disabled = true;
