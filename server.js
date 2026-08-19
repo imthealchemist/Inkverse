@@ -679,7 +679,10 @@ async function persistAllSupabase() {
 
 async function initSupabase() {
   const { createClient } = require('@supabase/supabase-js');
-  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+  // Node < 22 has no built-in WebSocket client — Supabase Realtime needs one,
+  // so provide the `ws` package as the transport on older runtimes (e.g. Railway).
+  const realtimeOpts = typeof globalThis.WebSocket === 'undefined' ? { transport: require('ws') } : {};
+  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false }, realtime: realtimeOpts });
   // Verify tables exist (schema.sql must be run once in the Supabase SQL Editor)
   const { error } = await supabase.from('users').select('id').limit(1);
   if (error) {
