@@ -36,6 +36,28 @@ On first boot an empty database is seeded with the demo library automatically.
 Covers are uploaded through the backend (validated: JPG/PNG/WebP, max **5 MB**)
 and stored in Supabase Storage; novels, chapters and user data live in Supabase tables.
 
+## Email verification (Gmail-style confirmation links)
+
+When SMTP is configured, new accounts receive a **confirmation link by email**
+and cannot log in until they click it (link expires in 24 h; resend is
+rate-limited to one per 2 minutes). Without SMTP config, accounts are
+auto-confirmed (frictionless local dev).
+
+Railway variables:
+
+| Variable | Example (Gmail) |
+|---|---|
+| `SMTP_HOST` | `smtp.gmail.com` |
+| `SMTP_PORT` | `587` |
+| `SMTP_USER` | `youraccount@gmail.com` |
+| `SMTP_PASS` | a Gmail **App Password** (not your normal password) |
+| `MAIL_FROM` | `SOLID INK NOVEL <youraccount@gmail.com>` (optional) |
+
+To get a Gmail App Password: Google Account → Security → 2-Step Verification
+(must be on) → **App passwords** → create one → paste the 16-character code.
+Works the same with Brevo/SendGrid/Mailjet SMTP if you prefer a sender service.
+Set `SMTP_HOST=console` to log emails to the server output instead of sending (testing).
+
 ## Deploying: Railway (host) + Supabase (free database)
 
 The app is Railway-ready out of the box (reads `$PORT`, binds `0.0.0.0`, zero build step).

@@ -49,6 +49,8 @@ async function api(path, opts = {}) {
     if (res.status === 401 && App.token) { App.token = null; App.user = null; localStorage.removeItem('iv_token'); }
     const err = new Error(data.error || ('Request failed (' + res.status + ')'));
     err.status = res.status;
+    err.unverified = !!data.unverified;
+    err.email = data.email || '';
     throw err;
   }
   return data;
@@ -185,6 +187,7 @@ async function route() {
     if (r === 'library') return await guard(() => vLibrary());
     if (r === 'profile') return await guard(() => vProfile());
     if (r === 'auth') return vAuth();
+    if (r === 'verify') return await vVerify(query);
     if (r === 'author' && seg[1]) return await vAuthor(seg[1]);
     if (r === 'novel' && seg[1]) return await vNovel(seg[1]);
     if (r === 'read' && seg[2]) return await vReader(seg[1], seg[2]);
@@ -227,6 +230,50 @@ async function vAuth() {
       <button class="btn full" type="submit">${authMode === 'login' ? 'Log in' : 'Create my account'}</button>
     </form>
   </div></div>`;
+}
+
+/* Gmail-style "check your email" screen */
+function showCheckEmail(email, isLoginBlocked) {
+  const wrap = $('.auth-wrap');
+  if (!wrap) return;
+  wrap.innerHTML = `<div class="auth-brand"><div class="big" style="font-size:44px">📬</div></div>
+    <div class="card" style="text-align:center">
+      <h3 style="margin-bottom:8px">${isLoginBlocked ? 'One more step' : 'Check your email'}</h3>
+      <p class="muted small" style="line-height:1.7">We sent a confirmation link to<br><b>${esc(email)}</b>.<br>
+      Click the link to ${isLoginBlocked ? 'unlock your account, then log in again' : 'activate your account'}.<br>
+      <span class="faint">It can take a minute to arrive — check spam too.</span></p>
+      <button class="btn ghost full" style="margin-top:12px" data-action="resend-verify" data-email="${esc(email)}">Resend email</button>
+      <button class="btn full" style="margin-top:8px" data-action="back-to-login">Back to log in</button>
+    </div>`;
+}
+
+/* #/verify?token=… — confirmation link landing page */
+async function vVerify(query) {
+  document.body.classList.add('no-tabbar');
+  $('#tabbar').innerHTML = '';
+  const token = query.get('token') || '';
+  $('#view').innerHTML = `<div class="page"><div class="auth-wrap">
+    <div class="auth-brand"><div class="big">SOLID INK <b>NOVEL</b></div></div>
+    <div class="center"><div class="loader"></div><p>Confirming your email…</p></div>
+  </div></div>`;
+  const wrap = $('.auth-wrap');
+  try {
+    const d = await api('/auth/verify-email?token=' + encodeURIComponent(token));
+    authMode = 'login';
+    wrap.innerHTML = `<div class="auth-brand"><div class="big" style="font-size:44px">🎉</div></div>
+      <div class="card" style="text-align:center"><h3>Email confirmed!</h3>
+      <p class="muted small" style="margin:8px 0 14px">Welcome aboard, ${esc(d.name)}. Your account is ready — log in to start reading.</p>
+      <a class="btn full" href="#/auth">Continue to log in</a></div>`;
+  } catch (e) {
+    wrap.innerHTML = `<div class="auth-brand"><div class="big" style="font-size:44px">⚠️</div></div>
+      <div class="card" style="text-align:center"><h3>Could not confirm</h3>
+      <p class="muted small" style="margin:8px 0 14px">${esc(e.message)}</p>
+      <form data-form="resend-verify" style="text-align:left">
+        <div class="field"><label>Your email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>
+        <button class="btn full" type="submit">Send me a new link</button>
+      </form>
+      <button class="btn ghost full" style="margin-top:8px" data-action="goto" data-href="#/auth">Back to log in</button></div>`;
+  }
 }
 
 /* ---------- home ---------- */
@@ -522,6 +569,10 @@ async function vProfile() {
         <button class="btn sm ghost" data-action="logout">Log out</button>
       </div>
     </div>
+    ${u.emailVerified === false ? `
+      <div class="banner" style="margin-top:16px"><div style="font-size:24px">📬</div>
+      <div class="bt spacer"><b>Email not confirmed</b><br>We sent a link to ${esc(u.email)} — confirm it to secure your account.</div>
+      <button class="btn sm" data-action="resend-verify" data-email="${esc(u.email)}">Resend</button></div>` : ''}
     ${u.role === 'writer' && !u.verified ? `
       <div class="banner" style="margin-top:16px"><div style="font-size:24px">✅</div>
       <div class="bt spacer"><b>${u.verificationPending ? 'Verification pending review' : 'Get verified'}</b><br>
@@ -963,6 +1014,13 @@ document.addEventListener('click', async e => {
     else if (a === 'install-app') {
       if (deferredInstall) { closeDrawer(); deferredInstall.prompt(); deferredInstall = null; }
     }
+    else if (a === 'resend-verify') {
+      el.disabled = true;
+      try { await api('/auth/resend-verification', { method: 'POST', body: { email: el.dataset.email } }); toast('Confirmation email sent 📬', 'ok'); }
+      catch (err) { toast(err.message, 'error'); }
+      el.disabled = false;
+    }
+    else if (a === 'back-to-login') { authMode = 'login'; vAuth(); }
     else if (a === 'report') {
       if (!App.user) { App.pendingRoute = location.hash; location.hash = '#/auth'; return; }
       openModal('Report content', `<p>Tell us what's wrong with this ${el.dataset.type}. An admin will review it.</p>
@@ -1071,13 +1129,23 @@ document.addEventListener('submit', async e => {
     if (kind === 'auth') {
       const body = { email: fd.get('email'), password: fd.get('password') };
       if (authMode === 'signup') body.name = fd.get('name');
-      const d = await api('/auth/' + authMode, { method: 'POST', body });
-      App.token = d.token; localStorage.setItem('iv_token', d.token);
-      await loadMe();
-      toast(authMode === 'login' ? 'Welcome back! 👋' : 'Account created — welcome! 🎉', 'ok');
-      const dest = App.pendingRoute && App.pendingRoute !== '#/auth' ? App.pendingRoute : '#/home';
-      App.pendingRoute = null;
-      nav(dest);
+      try {
+        const d = await api('/auth/' + authMode, { method: 'POST', body });
+        if (d.emailVerificationRequired) { if (btn) btn.disabled = false; showCheckEmail(body.email, false); return; }
+        App.token = d.token; localStorage.setItem('iv_token', d.token);
+        await loadMe();
+        toast(authMode === 'login' ? 'Welcome back! 👋' : 'Account created — welcome! 🎉', 'ok');
+        const dest = App.pendingRoute && App.pendingRoute !== '#/auth' ? App.pendingRoute : '#/home';
+        App.pendingRoute = null;
+        nav(dest);
+      } catch (err) {
+        if (err.unverified) { if (btn) btn.disabled = false; showCheckEmail(err.email || body.email, true); return; }
+        throw err;
+      }
+    }
+    else if (kind === 'resend-verify') {
+      await api('/auth/resend-verification', { method: 'POST', body: { email: fd.get('email') } });
+      toast('Confirmation email sent 📬', 'ok');
     }
     else if (kind === 'report') {
       await api('/reports', { method: 'POST', body: { type: form.dataset.type, targetId: form.dataset.id, reason: fd.get('reason') } });

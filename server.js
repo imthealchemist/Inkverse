@@ -133,7 +133,52 @@ function userOf(req) {
   return db.users.find(u => u.id === db.sessions[t]) || null;
 }
 function publicUser(u) {
-  return { id: u.id, name: u.name, email: u.email, role: u.role, verified: !!u.verified, bio: u.bio || '', banned: !!u.banned, joinedAt: u.joinedAt, avatarColor: u.avatarColor };
+  return { id: u.id, name: u.name, email: u.email, role: u.role, verified: !!u.verified, emailVerified: u.emailVerified !== false, bio: u.bio || '', banned: !!u.banned, joinedAt: u.joinedAt, avatarColor: u.avatarColor };
+}
+
+/* ---------------- email (verification links) ----------------
+   Enabled when SMTP env vars are set. SMTP_HOST=console logs mail
+   to stdout instead of sending (dev/testing). Without SMTP config,
+   accounts are auto-confirmed (keeps local dev frictionless). */
+const SMTP_CONSOLE = process.env.SMTP_HOST === 'console';
+const SMTP_ENABLED = SMTP_CONSOLE || !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+
+async function sendMail(to, subject, html) {
+  if (SMTP_CONSOLE) {
+    console.log('[mail:console] to=' + to + ' subject="' + subject + '" body: ' + html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+    return;
+  }
+  const nodemailer = require('nodemailer');
+  const transport = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT || '587', 10),
+    secure: String(process.env.SMTP_PORT) === '465',
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+  });
+  await transport.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to, subject, html });
+}
+
+function appOrigin(req) {
+  const proto = (req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
+  return proto + '://' + req.headers.host;
+}
+
+function verifyEmailHtml(name, link) {
+  return `<div style="font-family:Arial,sans-serif;max-width:480px;margin:0 auto;padding:24px;background:#0b0d12;color:#e9ebf2;border-radius:12px">
+  <h2 style="margin:0 0 4px">SOLID INK <span style="color:#8b5cf6">NOVEL</span></h2>
+  <p style="color:#98a1b3;margin:0 0 20px">Read boldly. Write bravely.</p>
+  <p>Hi ${name},</p>
+  <p>Welcome! Please confirm your email address by clicking the button below. The link expires in 24 hours.</p>
+  <p style="margin:26px 0"><a href="${link}" style="background:#8b5cf6;color:#fff;text-decoration:none;padding:12px 22px;border-radius:10px;font-weight:bold">Confirm my email</a></p>
+  <p style="color:#98a1b3;font-size:13px">If the button doesn't work, paste this link into your browser:<br>${link}</p>
+  <p style="color:#6b7385;font-size:12px;margin-top:26px">If you didn't create this account, you can safely ignore this email.</p>
+  </div>`;
+}
+
+function newVerifyToken(u) {
+  u.verifyToken = crypto.randomBytes(24).toString('hex');
+  u.verifyExpires = new Date(Date.now() + 24 * 36e5).toISOString();
+  u.lastResendAt = now();
 }
 function followerCount(userId) { return db.follows.filter(f => f.authorId === userId).length; }
 function followingCount(userId) { return db.follows.filter(f => f.followerId === userId).length; }
@@ -182,7 +227,7 @@ function route(method, pattern, handler, opts = {}) {
 }
 
 /* ---- auth ---- */
-route('POST', '/api/auth/signup', ({ res, body }) => {
+route('POST', '/api/auth/signup', async ({ res, req, body }) => {
   const name = String(body.name || '').trim();
   const email = String(body.email || '').trim().toLowerCase();
   const password = String(body.password || '');
@@ -193,7 +238,16 @@ route('POST', '/api/auth/signup', ({ res, body }) => {
   const salt = crypto.randomBytes(8).toString('hex');
   const colors = ['#8b5cf6', '#f59e0b', '#22c55e', '#3b82f6', '#ec4899', '#14b8a6', '#f97316', '#e11d48', '#06b6d4', '#a3e635'];
   const u = { id: uid(), name, email, salt, passHash: hashPw(password, salt), role: 'reader', verified: false, bio: '', banned: false, joinedAt: now(), avatarColor: colors[Math.floor(Math.random() * colors.length)] };
+  if (SMTP_ENABLED) { u.emailVerified = false; newVerifyToken(u); }
+  else u.emailVerified = true;
   db.users.push(u);
+  saveDB();
+  if (SMTP_ENABLED) {
+    const link = appOrigin(req) + '/#/verify?token=' + u.verifyToken;
+    try { await sendMail(email, 'Confirm your SOLID INK NOVEL account', verifyEmailHtml(name, link)); }
+    catch (e) { console.error('[mail] verification email failed:', e.message); }
+    return json(res, 200, { emailVerificationRequired: true, user: publicUser(u) });
+  }
   const token = crypto.randomBytes(24).toString('hex');
   db.sessions[token] = u.id;
   saveDB();
@@ -205,10 +259,39 @@ route('POST', '/api/auth/login', ({ res, body }) => {
   const u = db.users.find(x => x.email === email);
   if (!u || u.passHash !== hashPw(String(body.password || ''), u.salt)) throw httpError(401, 'Invalid email or password');
   if (u.banned) throw httpError(403, 'This account has been suspended');
+  if (SMTP_ENABLED && u.emailVerified === false) {
+    return json(res, 403, { error: 'Email not verified', unverified: true, email: u.email });
+  }
   const token = crypto.randomBytes(24).toString('hex');
   db.sessions[token] = u.id;
   saveDB();
   json(res, 200, { token, user: publicUser(u) });
+});
+
+route('GET', '/api/auth/verify-email', ({ res, query }) => {
+  const t = String(query.get('token') || '');
+  const u = db.users.find(x => x.verifyToken && x.verifyToken === t);
+  if (!u) return json(res, 400, { ok: false, error: 'This confirmation link is invalid or has already been used.' });
+  if (u.verifyExpires && new Date(u.verifyExpires) < new Date()) return json(res, 400, { ok: false, error: 'This confirmation link has expired. Request a new one from the login page.' });
+  u.emailVerified = true; u.verifyToken = null; u.verifyExpires = null;
+  saveDB();
+  json(res, 200, { ok: true, name: u.name });
+});
+
+route('POST', '/api/auth/resend-verification', async ({ res, req, body }) => {
+  const email = String(body.email || '').trim().toLowerCase();
+  const u = db.users.find(x => x.email === email);
+  // Don't reveal whether the account exists; just rate-limit real ones.
+  if (!u || u.emailVerified !== false) return json(res, 200, { ok: true });
+  if (u.lastResendAt && Date.now() - new Date(u.lastResendAt).getTime() < 120000) {
+    throw httpError(429, 'Please wait 2 minutes before requesting another email.');
+  }
+  newVerifyToken(u);
+  saveDB();
+  const link = appOrigin(req) + '/#/verify?token=' + u.verifyToken;
+  try { await sendMail(email, 'Confirm your SOLID INK NOVEL account', verifyEmailHtml(u.name, link)); }
+  catch (e) { console.error('[mail] resend failed:', e.message); throw httpError(500, 'Could not send the email. Please try again later.'); }
+  json(res, 200, { ok: true });
 });
 
 route('POST', '/api/auth/logout', ({ res, req }, ) => {

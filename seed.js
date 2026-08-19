@@ -9,7 +9,7 @@ const daysAgo = (n, h = 0) => new Date(Date.now() - n * 864e5 - h * 36e5).toISOS
 function build() {
   const mkUser = (name, email, role, verified, bio, color, joined) => {
     const salt = crypto.randomBytes(8).toString('hex');
-    return { id: uid(), name, email, salt, passHash: hashPw('demo123', salt), role, verified, bio, banned: false, joinedAt: joined, avatarColor: color };
+    return { id: uid(), name, email, salt, passHash: hashPw('demo123', salt), role, verified, emailVerified: true, bio, banned: false, joinedAt: joined, avatarColor: color };
   };
 
   const admin = mkUser('Solid Ink Admin', 'admin@demo.app', 'admin', true, 'Keeping SOLID INK NOVEL safe, one story at a time.', '#64748b', daysAgo(400));
