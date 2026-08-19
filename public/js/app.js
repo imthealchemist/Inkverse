@@ -408,6 +408,7 @@ async function vReader(novelId, chapterId) {
     <div class="reader-top">
       <a class="icon-btn" href="#/novel/${d.novel.id}" aria-label="Back to novel">${I.back}</a>
       <div class="rt-title">${esc(d.novel.title)} · Ch. ${d.num}/${d.total}</div>
+      <button class="icon-btn" data-action="download-novel" data-novel="${d.novel.id}" title="Download for offline" style="font-size:15px">⬇</button>
       <button class="icon-btn" data-action="reader-list" aria-label="Chapters">${I.list}</button>
       <button class="icon-btn" data-action="reader-settings" aria-label="Settings">${I.settings}</button>
     </div>
@@ -425,6 +426,14 @@ async function vReader(novelId, chapterId) {
       </div>
     </div>
   </div>`;
+  // show ✓ on the download button if this novel is already saved offline
+  try {
+    const dl = await idb.get(d.novel.id);
+    if (dl) {
+      const rb = $('.reader-top [data-action="download-novel"]');
+      if (rb) { rb.textContent = '✓'; rb.style.color = '#4ade80'; }
+    }
+  } catch (e) { /* IndexedDB unavailable */ }
 }
 function readerSettingsModal() {
   const theme = localStorage.getItem('iv_rtheme') || 'paper';
@@ -936,10 +945,14 @@ document.addEventListener('click', async e => {
           novel: { id: nid, title: d.novel.title, cover: d.novel.cover, authorName: d.novel.authorName, genres: d.novel.genres },
           chapters, at: new Date().toISOString()
         });
-        btn.disabled = false; btn.innerHTML = '⬇ Update download';
+        btn.disabled = false;
+        if (btn.classList.contains('icon-btn')) { btn.textContent = '✓'; btn.style.color = '#4ade80'; }
+        else btn.innerHTML = '⬇ Update download';
         toast('Downloaded for offline reading ✓', 'ok');
       } catch (err) {
-        btn.disabled = false; btn.innerHTML = '⬇ Download';
+        btn.disabled = false;
+        if (btn.classList.contains('icon-btn')) btn.textContent = '⬇';
+        else btn.innerHTML = '⬇ Download';
         toast(err.message, 'error');
       }
     }
