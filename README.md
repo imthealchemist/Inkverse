@@ -38,25 +38,40 @@ and stored in Supabase Storage; novels, chapters and user data live in Supabase 
 
 ## Email verification (Gmail-style confirmation links)
 
-When SMTP is configured, new accounts receive a **confirmation link by email**
-and cannot log in until they click it (link expires in 24 h; resend is
-rate-limited to one per 2 minutes). Without SMTP config, accounts are
+When an email provider is configured, new accounts receive a **confirmation link
+by email** and cannot log in until they click it (link expires in 24 h; resend is
+rate-limited to one per 2 minutes). Without any config, accounts are
 auto-confirmed (frictionless local dev).
 
-Railway variables:
+> ⚠️ **Railway blocks outbound SMTP** (ports 25/465/587), so Gmail SMTP times out
+> there. On Railway use one of the free **HTTPS email APIs** below instead —
+> they send over port 443, which Railway allows.
 
-| Variable | Example (Gmail) |
-|---|---|
-| `SMTP_HOST` | `smtp.gmail.com` |
-| `SMTP_PORT` | `587` |
-| `SMTP_USER` | `youraccount@gmail.com` |
-| `SMTP_PASS` | a Gmail **App Password** (not your normal password) |
-| `MAIL_FROM` | `SOLID INK NOVEL <youraccount@gmail.com>` (optional) |
+### Option A — Brevo (recommended: 300 emails/day free)
 
-To get a Gmail App Password: Google Account → Security → 2-Step Verification
-(must be on) → **App passwords** → create one → paste the 16-character code.
-Works the same with Brevo/SendGrid/Mailjet SMTP if you prefer a sender service.
-Set `SMTP_HOST=console` to log emails to the server output instead of sending (testing).
+1. Sign up free at https://www.brevo.com → **SMTP & API → API Keys → create a v3 key** (all email scopes).
+2. Railway variables:
+   - `EMAIL_PROVIDER` = `brevo`
+   - `BREVO_API_KEY` = the key you created
+   - `MAIL_FROM` = `SOLID INK NOVEL <you@yourdomain.com>` (any sender address; verify it in Brevo → *Senders* if prompted)
+
+### Option B — SendGrid (100 emails/day free)
+
+1. Sign up free at https://sendgrid.com → **Settings → API Keys → Create** (Mail Send scope).
+2. Verify your sender address once under **Settings → Sender Authentication → Single Sender**.
+3. Railway variables: `EMAIL_PROVIDER=sendgrid`, `SENDGRID_API_KEY=…`, `MAIL_FROM=… <verified-sender>`.
+
+### Option C — Resend (100/day free)
+
+Railway variables: `EMAIL_PROVIDER=resend`, `RESEND_API_KEY=…`, `MAIL_FROM=…`.
+Note: Resend's free tier without a verified domain can only email *your own* address.
+
+### Local / other hosts — SMTP (e.g. Gmail)
+
+`SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER=<your gmail>`,
+`SMTP_PASS=<Gmail App Password>`, `MAIL_FROM=…`.
+(Google Account → Security → 2-Step Verification → **App passwords**.)
+Set `SMTP_HOST=console` to log emails to stdout instead of sending (testing).
 
 ## Deploying: Railway (host) + Supabase (free database)
 

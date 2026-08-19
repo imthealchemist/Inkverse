@@ -137,23 +137,73 @@ function publicUser(u) {
 }
 
 /* ---------------- email (verification links) ----------------
-   Enabled when SMTP env vars are set. SMTP_HOST=console logs mail
-   to stdout instead of sending (dev/testing). Without SMTP config,
-   accounts are auto-confirmed (keeps local dev frictionless). */
+   Providers (first match wins):
+   - HTTP APIs over port 443 — REQUIRED on Railway, which blocks outbound SMTP.
+     EMAIL_PROVIDER=brevo|sendgrid|resend + matching *_API_KEY (all have free tiers).
+   - SMTP (nodemailer) — works on hosts that allow it; NOT on Railway.
+   - SMTP_HOST=console — logs mail to stdout (dev/testing).
+   With nothing configured, accounts are auto-confirmed (frictionless local dev). */
 const SMTP_CONSOLE = process.env.SMTP_HOST === 'console';
-const SMTP_ENABLED = SMTP_CONSOLE || !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+const EMAIL_PROVIDER = (process.env.EMAIL_PROVIDER || '').toLowerCase();
+const HTTP_MAIL =
+  (EMAIL_PROVIDER === 'brevo' && !!process.env.BREVO_API_KEY) ||
+  (EMAIL_PROVIDER === 'sendgrid' && !!process.env.SENDGRID_API_KEY) ||
+  (EMAIL_PROVIDER === 'resend' && !!process.env.RESEND_API_KEY);
+const SMTP_ENABLED = SMTP_CONSOLE || HTTP_MAIL || !!(process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS);
+
+function parseFrom() {
+  const raw = String(process.env.MAIL_FROM || process.env.SMTP_USER || '');
+  const m = raw.match(/^([^<]*)<([^>]+)>$/);
+  if (m) return { name: m[1].trim(), email: m[2].trim() };
+  return { name: 'SOLID INK NOVEL', email: raw.trim() };
+}
+
+async function sendBrevo(to, subject, html) {
+  const from = parseFrom();
+  const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+    method: 'POST',
+    headers: { 'api-key': process.env.BREVO_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sender: { name: from.name || 'SOLID INK NOVEL', email: from.email }, to: [{ email: to }], subject, htmlContent: html })
+  });
+  if (!r.ok) throw new Error('Brevo ' + r.status + ': ' + (await r.text()).slice(0, 220));
+}
+
+async function sendSendGrid(to, subject, html) {
+  const from = parseFrom();
+  const r = await fetch('https://api.sendgrid.com/v3/mail/send', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + process.env.SENDGRID_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ personalizations: [{ to: [{ email: to }] }], from: { email: from.email, name: from.name || 'SOLID INK NOVEL' }, subject, content: [{ type: 'text/html', value: html }] })
+  });
+  if (!r.ok) throw new Error('SendGrid ' + r.status + ': ' + (await r.text()).slice(0, 220));
+}
+
+async function sendResend(to, subject, html) {
+  const from = parseFrom();
+  const fromStr = from.name ? from.name + ' <' + from.email + '>' : from.email;
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer ' + process.env.RESEND_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: fromStr, to: [to], subject, html })
+  });
+  if (!r.ok) throw new Error('Resend ' + r.status + ': ' + (await r.text()).slice(0, 220));
+}
 
 async function sendMail(to, subject, html) {
   if (SMTP_CONSOLE) {
     console.log('[mail:console] to=' + to + ' subject="' + subject + '" body: ' + html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
     return;
   }
+  if (EMAIL_PROVIDER === 'brevo' && process.env.BREVO_API_KEY) return sendBrevo(to, subject, html);
+  if (EMAIL_PROVIDER === 'sendgrid' && process.env.SENDGRID_API_KEY) return sendSendGrid(to, subject, html);
+  if (EMAIL_PROVIDER === 'resend' && process.env.RESEND_API_KEY) return sendResend(to, subject, html);
   const nodemailer = require('nodemailer');
   const transport = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: parseInt(process.env.SMTP_PORT || '587', 10),
     secure: String(process.env.SMTP_PORT) === '465',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    connectionTimeout: 15000
   });
   await transport.sendMail({ from: process.env.MAIL_FROM || process.env.SMTP_USER, to, subject, html });
 }
