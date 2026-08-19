@@ -43,9 +43,18 @@ chk "follow" "$(curl -s -X POST $B/users/$ZID/follow -H "Authorization: Bearer $
 chk "report" "$(curl -s -X POST $B/reports -H "Authorization: Bearer $RT" -H 'Content-Type: application/json' -d "{\"type\":\"novel\",\"targetId\":\"$NID\",\"reason\":\"test report\"}" | j "['ok']")" "True"
 
 # 7. writer flow: create novel, draft chapter, publish
-NN=$(curl -s -X POST $B/novels -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d '{"title":"Test Novel API","description":"testing","genres":["Fantasy","Drama"],"cover":""}')
+chk "novel requires rights confirmation" "$(curl -s -X POST $B/novels -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d '{"title":"No Rights","genres":["Drama"]}' | j "['error']")" "You must confirm you have the rights to publish this content"
+NN=$(curl -s -X POST $B/novels -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d '{"title":"Test Novel API","description":"testing","genres":["Fantasy","Drama"],"cover":"","rightsConfirmed":true}')
 NNID=$(echo "$NN" | j "['novel']['id']")
 chk "novel created" "$(echo "$NN" | j "['novel']['title']")" "Test Novel API"
+
+# 7b. cover upload validation
+JPG="data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AVN//2Q=="
+chk "cover upload ok" "$(curl -s -X POST $B/upload-cover -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d "{\"dataUrl\":\"$JPG\"}" | j "['url'][:15]")" "data:image/jpeg"
+chk "cover bad type rejected" "$(curl -s -X POST $B/upload-cover -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d '{"dataUrl":"data:image/gif;base64,R0lGODlhAQABAAAAACw="}' | j "['error']")" "Cover must be a JPG, PNG or WebP image"
+chk "cover needs writer" "$(curl -s -X POST $B/upload-cover -H "Authorization: Bearer $RT" -H 'Content-Type: application/json' -d "{\"dataUrl\":\"$JPG\"}" | j "['error']")" "A writer account is required"
+python3 -c "import base64,json;open('/tmp/bigcover.json','w').write(json.dumps({'dataUrl':'data:image/jpeg;base64,'+base64.b64encode(b'A'*5300000).decode()}))"
+chk "cover oversized rejected" "$(curl -s -X POST $B/upload-cover -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d @/tmp/bigcover.json | j "['error']")" "Cover exceeds the 5 MB limit"
 CH=$(curl -s -X POST $B/novels/$NNID/chapters -H "Authorization: Bearer $WT" -H 'Content-Type: application/json' -d '{"title":"Ch One","content":"<p>Hello world of words.</p>","status":"draft"}')
 CHID=$(echo "$CH" | j "['chapter']['id']")
 chk "draft created" "$(echo "$CH" | j "['chapter']['status']")" "draft"

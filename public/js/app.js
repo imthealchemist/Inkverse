@@ -76,6 +76,36 @@ function cleanHtml(html) {
   return t.innerHTML;
 }
 
+/* ---------------- offline store (IndexedDB) ---------------- */
+const idb = (() => {
+  let dbp = null;
+  function open() {
+    if (dbp) return dbp;
+    dbp = new Promise((res, rej) => {
+      const r = indexedDB.open('solidink-offline', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('novels', { keyPath: 'id' });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+    return dbp;
+  }
+  async function tx(mode, fn) {
+    const db = await open();
+    return new Promise((res, rej) => {
+      const t = db.transaction('novels', mode);
+      const req = fn(t.objectStore('novels'));
+      t.oncomplete = () => res(req ? req.result : undefined);
+      t.onerror = () => rej(t.error);
+    });
+  }
+  return {
+    put: v => tx('readwrite', s => s.put(v)),
+    get: id => tx('readonly', s => s.get(id)),
+    del: id => tx('readwrite', s => s.delete(id)),
+    all: () => tx('readonly', s => s.getAll())
+  };
+})();
+
 /* ---------------- chrome ---------------- */
 function renderTabbar(active) {
   const tabs = [['home', 'Home', '#/home'], ['browse', 'Browse', '#/browse'], ['search', 'Search', '#/search'], ['library', 'Library', '#/library'], ['profile', 'You', '#/profile']];
@@ -96,6 +126,7 @@ function openDrawer() {
     if (u.role === 'reader') items += `<button class="menu-item accent" data-action="join-writer">${I.pen}<span>Join as a Writer</span></button>`;
     else items += link(I.pen, 'Writer Dashboard', '#/writer');
     if (u.role === 'admin') items += link(I.shield, 'Admin Panel', '#/admin');
+    items += `<button class="menu-item" id="install-entry" data-action="install-app" style="display:${deferredInstall ? 'flex' : 'none'}"><span style="font-size:18px;width:19px;text-align:center">📲</span><span>Install app</span></button>`;
     items += `<button class="menu-item danger-l" data-action="logout">${I.logout}<span>Log out</span></button>`;
   }
   $('#drawer-root').innerHTML = `<div class="drawer-back"><div class="drawer">
@@ -156,7 +187,7 @@ async function route() {
     if (r === 'auth') return vAuth();
     if (r === 'author' && seg[1]) return await vAuthor(seg[1]);
     if (r === 'novel' && seg[1]) return await vNovel(seg[1]);
-    if (r === 'read' && seg[2]) return await vReader(seg[2]);
+    if (r === 'read' && seg[2]) return await vReader(seg[1], seg[2]);
     if (r === 'writer') return await guard(() => vWriterHome(), ['writer', 'admin']);
     if (r === 'manage' && seg[1]) return await guard(() => vManage(seg[1]), ['writer', 'admin']);
     if (r === 'editor' && seg[1] === 'new' && seg[2]) return await guard(() => vEditorNew(seg[2]), ['writer', 'admin']);
@@ -322,9 +353,10 @@ async function vNovel(id) {
     </div>
   </div>
   <div class="page" style="max-width:760px">
-    <div class="row" style="gap:9px;margin:16px 0">
+    <div class="row" style="gap:9px;margin:16px 0;flex-wrap:wrap">
       ${readHref ? `<a class="btn" style="flex:1.4" href="${readHref}">${readLabel}</a>` : `<button class="btn" style="flex:1.4" disabled>No chapters yet</button>`}
       ${u ? `<button class="btn ghost" style="flex:1" data-action="bookmark" data-novel="${n.id}" data-bm="${n.bookmarked}">${n.bookmarked ? '🔖 Bookmarked' : '🔖 Bookmark'}</button>` : `<a class="btn ghost" style="flex:1" href="#/auth">🔖 Bookmark</a>`}
+      <button class="btn ghost" style="flex:1" id="dl-btn" data-action="download-novel" data-novel="${n.id}">⬇ Download</button>
       ${isOwner ? `<a class="btn ghost" href="#/manage/${n.id}">Manage</a>` : ''}
     </div>
     ${u && u.id !== n.authorId ? `<div class="small faint" style="margin-bottom:14px"><button class="pill-link" style="padding:0" data-action="report" data-type="novel" data-id="${n.id}">${I.flag.replace(/width="\d+" height="\d+"/, 'width="13" height="13"')} Report this novel</button></div>` : ''}
@@ -339,14 +371,37 @@ async function vNovel(id) {
       : (isOwner ? `<div class="chapter-item" style="opacity:.6"><span class="num">${i + 1}</span><span style="flex:1"><span class="ct">${esc(c.title)}</span><br><span class="cs">Draft · ${timeAgo(c.updatedAt)}</span></span><span class="badge draft">Draft</span></div>` : '')).join('')
     : `<div class="empty">No chapters published yet — check back soon.</div>`}
   </div>`;
+  // reflect existing offline download on the button
+  try {
+    const dl = await idb.get(n.id);
+    const b = $('#dl-btn');
+    if (dl && b) b.innerHTML = '⬇ Update download';
+  } catch (e) { /* IndexedDB unavailable */ }
 }
 
 /* ---------- reader ---------- */
-async function vReader(chapterId) {
+async function vReader(novelId, chapterId) {
   document.body.classList.add('reader-mode');
-  const d = await api('/chapters/' + chapterId);
+  let d, offlineRead = false;
+  try {
+    d = await api('/chapters/' + chapterId);
+  } catch (err) {
+    // Offline (or deleted) — fall back to the local download if we have it
+    let dl = null;
+    try { dl = await idb.get(novelId); } catch (e) { /* no idb */ }
+    const idx = dl ? dl.chapters.findIndex(c => c.id === chapterId) : -1;
+    if (!dl || idx < 0) throw err;
+    offlineRead = true;
+    d = {
+      chapter: dl.chapters[idx],
+      novel: { id: dl.novel.id, title: dl.novel.title, cover: dl.novel.cover },
+      prev: idx > 0 ? dl.chapters[idx - 1] : null,
+      next: idx < dl.chapters.length - 1 ? dl.chapters[idx + 1] : null,
+      num: idx + 1, total: dl.chapters.length
+    };
+  }
   App.readerState.novel = d.novel.id;
-  if (App.user) api('/me/history', { method: 'POST', body: { novelId: d.novel.id, chapterId: d.chapter.id } }).catch(() => {});
+  if (App.user && !offlineRead) api('/me/history', { method: 'POST', body: { novelId: d.novel.id, chapterId: d.chapter.id } }).catch(() => {});
   const theme = localStorage.getItem('iv_rtheme') || 'paper';
   const fs = parseInt(localStorage.getItem('iv_rfs') || '18', 10);
   $('#view').innerHTML = `<div class="reader ${theme}" id="reader-root" style="--rfs:${fs}px">
@@ -357,6 +412,7 @@ async function vReader(chapterId) {
       <button class="icon-btn" data-action="reader-settings" aria-label="Settings">${I.settings}</button>
     </div>
     <div class="reader-body">
+      ${offlineRead ? '<div class="notice">📴 You are offline — reading from your downloads.</div>' : ''}
       <h1>${esc(d.chapter.title)}</h1>
       <div class="rd-meta">Chapter ${d.num} of ${d.total} · ${fmtNum(d.chapter.wordCount)} words · updated ${timeAgo(d.chapter.updatedAt)}</div>
       <div class="reader-content">${cleanHtml(d.chapter.content)}</div>
@@ -388,32 +444,48 @@ function readerSettingsModal() {
 function readerListModal() {
   const root = $('#reader-root'); if (!root) return;
   const novelId = App.readerState.novel;
-  api('/novels/' + novelId).then(d => {
-    openModal('Chapters', d.chapters.filter(c => c.status === 'published').map((c, i) =>
-      `<a class="chapter-item" href="#/read/${novelId}/${c.id}"><span class="num">${i + 1}</span><span style="flex:1"><span class="ct">${esc(c.title)}</span><br><span class="cs">${fmtNum(c.wordCount)} words</span></span></a>`).join('') || '<div class="empty">No chapters.</div>');
-  }).catch(e => toast(e.message, 'error'));
+  const renderList = chapters => openModal('Chapters', chapters.map((c, i) =>
+    `<a class="chapter-item" href="#/read/${novelId}/${c.id}"><span class="num">${i + 1}</span><span style="flex:1"><span class="ct">${esc(c.title)}</span><br><span class="cs">${fmtNum(c.wordCount)} words</span></span></a>`).join('') || '<div class="empty">No chapters.</div>');
+  api('/novels/' + novelId).then(d => renderList(d.chapters.filter(c => c.status === 'published')))
+    .catch(async () => {
+      try { const dl = await idb.get(novelId); if (dl) return renderList(dl.chapters); } catch (e) { /* ignore */ }
+      toast('Offline — chapter list unavailable', 'error');
+    });
 }
 
 /* ---------- library ---------- */
 async function vLibrary() {
   document.body.classList.remove('no-tabbar');
   renderTabbar('library');
-  const d = await api('/me/library');
+  let downloads = [];
+  try { downloads = (await idb.all()) || []; } catch (e) { /* no idb */ }
+  let d = { bookmarks: [], history: [] }, offline = false;
+  try { d = await api('/me/library'); } catch (e) { offline = true; }
   $('#view').innerHTML = `<div class="page">
     <h1 style="font-size:21px;font-weight:800;margin-bottom:14px">My Library</h1>
-    ${d.history.length ? `<div class="section-h"><h2>Continue reading</h2></div>` + d.history.slice(0, 5).map(h => `
+    ${offline ? '<div class="notice">📴 You are offline — bookmarks and history are unavailable, but your downloads are ready below.</div>' : ''}
+    ${!offline && d.history.length ? `<div class="section-h"><h2>Continue reading</h2></div>` + d.history.slice(0, 5).map(h => `
       <div class="lrow">${coverImg(h.novel)}
         <div style="flex:1;min-width:0"><div class="lrow-t">${esc(h.novel.title)}</div>
         <div class="lrow-s">Ch. ${h.chapterNum || '?'} of ${h.totalChapters} — ${esc(h.chapterTitle)}</div>
         <div class="lrow-s faint">${timeAgo(h.at)}</div></div>
         <a class="btn sm" href="#/read/${h.novel.id}/${h.chapterId}">Resume</a></div>`).join('') : ''}
-    <div class="section-h" style="margin-top:22px"><h2>Bookmarks (${d.bookmarks.length})</h2></div>
-    ${d.bookmarks.length ? d.bookmarks.map(b => `
+    <div class="section-h" style="margin-top:22px"><h2>⬇ Downloaded (${downloads.length})</h2></div>
+    ${downloads.length ? downloads.map(dl => `
+      <div class="lrow">${coverImg(dl.novel)}
+        <div style="flex:1;min-width:0"><div class="lrow-t">${esc(dl.novel.title)}</div>
+        <div class="lrow-s">${dl.chapters.length} chapters · ${fmtNum(dl.chapters.reduce((s, c) => s + (c.wordCount || 0), 0))} words · works offline</div>
+        <div class="lrow-s faint">Downloaded ${timeAgo(dl.at)}</div></div>
+        <a class="btn sm" href="#/read/${dl.novel.id}/${dl.chapters[0].id}">Read</a>
+        <button class="icon-btn" data-action="delete-download" data-novel="${dl.novel.id}" title="Delete download">${I.x}</button></div>`).join('')
+    : `<div class="empty">Nothing downloaded yet.<br><span class="small">Tap ⬇ Download on any novel to read it without internet.</span></div>`}
+    ${offline ? '' : `<div class="section-h" style="margin-top:22px"><h2>Bookmarks (${d.bookmarks.length})</h2></div>`}
+    ${!offline && d.bookmarks.length ? d.bookmarks.map(b => `
       <div class="lrow">${coverImg(b)}
         <div style="flex:1;min-width:0"><a href="#/novel/${b.id}" class="lrow-t" style="display:block">${esc(b.title)}</a>
         <div class="lrow-s">${esc(b.authorName)} · ${b.chapterCount} chapters</div></div>
         <button class="icon-btn" data-action="bookmark" data-novel="${b.id}" data-bm="true" data-reload="1" title="Remove bookmark">${I.x}</button></div>`).join('')
-    : `<div class="empty">No bookmarks yet.<br><span class="small">Tap 🔖 on any novel to save it here.</span></div>`}
+    : (offline ? '' : `<div class="empty">No bookmarks yet.<br><span class="small">Tap 🔖 on any novel to save it here.</span></div>`)}
   </div>`;
 }
 
@@ -526,24 +598,39 @@ function novelFormModal(existing) {
           <div class="cu-prev" id="${gid}-prev">${n.cover ? `<img src="${esc(n.cover)}">` : 'No cover'}</div>
           <div style="flex:1"><input type="file" id="${gid}-file" accept="image/*" style="display:none">
           <button type="button" class="btn ghost sm" id="${gid}-btn">Upload cover</button>
-          <div class="hint">JPG/PNG. It will be resized automatically.</div></div>
+          <div class="hint">JPG, PNG or WebP · max 5 MB</div></div>
         </div></div>
       <div class="field"><label>Title</label><input class="input" name="title" required minlength="2" maxlength="120" value="${esc(n.title)}" placeholder="e.g. The Starless Road"></div>
       <div class="field"><label>Description</label><textarea class="input" name="description" rows="4" maxlength="2000" placeholder="A short synopsis readers see on your novel page…">${esc(n.description)}</textarea></div>
       <div class="field"><label>Genres (pick up to 5)</label>
         <div class="chips" id="${gid}-genres">${App.genres.map(g => `<button type="button" class="chip selectable ${n.genres.includes(g.name) ? 'active' : ''}" data-genre="${esc(g.name)}">${gIcon(g.name)} ${esc(g.name)}</button>`).join('')}</div>
       </div>
+      <div class="field"><label>Content rights</label>
+        <label class="rights"><input type="checkbox" name="rights" required ${existing && existing.rightsConfirmed ? 'checked' : ''}>
+        <span>I confirm that I wrote this content or hold the rights to publish it on SOLID INK NOVEL, and that it does not infringe anyone's copyright.</span></label>
+      </div>
       <button class="btn full" type="submit">${existing ? 'Save changes' : 'Create novel'}</button>
     </form>`);
   let coverData = n.cover || '';
+  const MAX_COVER = 5 * 1024 * 1024;
+  const OK_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
   $('#' + gid + '-btn').onclick = () => $('#' + gid + '-file').click();
   $('#' + gid + '-file').onchange = async e => {
-    const f = e.target.files[0]; if (!f) return;
+    const f = e.target.files[0]; e.target.value = '';
+    if (!f) return;
+    if (!OK_TYPES.includes(f.type)) { toast('Only JPG, PNG or WebP images are allowed', 'error'); return; }
+    if (f.size > MAX_COVER) { toast('Image too large — max 5 MB (yours is ' + (f.size / 1048576).toFixed(1) + ' MB)', 'error'); return; }
+    const btn = $('#' + gid + '-btn');
     try {
-      coverData = await fileToDataUrl(f, 640);
-      $('#' + gid + '-prev').innerHTML = `<img src="${coverData}">`;
-      window.__pendingCover = coverData;
-    } catch (err) { toast('Could not read that image', 'error'); }
+      const dataUrl = await fileToDataUrl(f, 640); // compress before sending
+      btn.disabled = true; btn.textContent = 'Uploading…';
+      const d = await api('/upload-cover', { method: 'POST', body: { dataUrl } }); // server re-validates + stores
+      coverData = d.url;
+      window.__pendingCover = d.url;
+      $('#' + gid + '-prev').innerHTML = `<img src="${esc(d.url)}">`;
+      toast('Cover uploaded ✓', 'ok');
+    } catch (err) { toast(err.message, 'error'); }
+    finally { btn.disabled = false; btn.textContent = 'Upload cover'; }
   };
   window.__pendingCover = coverData;
   window.__novelCoverGetter = () => window.__pendingCover;
@@ -831,6 +918,38 @@ document.addEventListener('click', async e => {
       el.classList.toggle('active-state', d.following); el.classList.toggle('outline', !d.following);
       toast(d.following ? 'Following writer ✓' : 'Unfollowed');
     }
+    else if (a === 'download-novel') {
+      const btn = el, nid = el.dataset.novel;
+      try {
+        btn.disabled = true;
+        const d = await api('/novels/' + nid);
+        const pub = d.chapters.filter(c => c.status === 'published');
+        if (!pub.length) { toast('No chapters to download yet'); btn.disabled = false; return; }
+        const chapters = [];
+        for (let i = 0; i < pub.length; i++) {
+          btn.textContent = `Downloading ${i + 1}/${pub.length}…`;
+          const cd = await api('/chapters/' + pub[i].id);
+          chapters.push({ id: cd.chapter.id, title: cd.chapter.title, content: cd.chapter.content, wordCount: cd.chapter.wordCount, updatedAt: cd.chapter.updatedAt });
+        }
+        await idb.put({
+          id: nid,
+          novel: { id: nid, title: d.novel.title, cover: d.novel.cover, authorName: d.novel.authorName, genres: d.novel.genres },
+          chapters, at: new Date().toISOString()
+        });
+        btn.disabled = false; btn.innerHTML = '⬇ Update download';
+        toast('Downloaded for offline reading ✓', 'ok');
+      } catch (err) {
+        btn.disabled = false; btn.innerHTML = '⬇ Download';
+        toast(err.message, 'error');
+      }
+    }
+    else if (a === 'delete-download') {
+      try { await idb.del(el.dataset.novel); toast('Download removed'); } catch (e) { toast('Could not remove download', 'error'); }
+      route();
+    }
+    else if (a === 'install-app') {
+      if (deferredInstall) { closeDrawer(); deferredInstall.prompt(); deferredInstall = null; }
+    }
     else if (a === 'report') {
       if (!App.user) { App.pendingRoute = location.hash; location.hash = '#/auth'; return; }
       openModal('Report content', `<p>Tell us what's wrong with this ${el.dataset.type}. An admin will review it.</p>
@@ -963,7 +1082,9 @@ document.addEventListener('submit', async e => {
     }
     else if (kind === 'create-novel' || kind === 'edit-novel') {
       const genres = $$('.modal [data-genre].active').map(b => b.dataset.genre);
-      const body = { title: fd.get('title'), description: fd.get('description'), genres, cover: window.__novelCoverGetter ? window.__novelCoverGetter() : '' };
+      const rightsBox = form.querySelector('[name="rights"]');
+      if (rightsBox && !rightsBox.checked) { toast('Please confirm you hold the rights to this content', 'error'); if (btn) btn.disabled = false; return; }
+      const body = { title: fd.get('title'), description: fd.get('description'), genres, cover: window.__novelCoverGetter ? window.__novelCoverGetter() : '', rightsConfirmed: true };
       if (!genres.length) { toast('Pick at least one genre', 'error'); if (btn) btn.disabled = false; return; }
       let id = form.dataset.novel;
       if (kind === 'create-novel') { const d = await api('/novels', { method: 'POST', body }); id = d.novel.id; }
@@ -977,6 +1098,19 @@ document.addEventListener('submit', async e => {
     }
   } catch (err) { toast(err.message, 'error'); if (btn) btn.disabled = false; }
 });
+
+/* ---------------- PWA ---------------- */
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredInstall = e;
+  const b = $('#install-entry');
+  if (b) b.style.display = 'flex';
+});
+window.addEventListener('appinstalled', () => toast('Installed — find SOLID INK NOVEL on your home screen 🎉', 'ok'));
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
 
 /* ---------------- boot ---------------- */
 $('#menu-btn').addEventListener('click', openDrawer);

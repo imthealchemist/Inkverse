@@ -16,19 +16,24 @@ const PUB = path.join(ROOT, 'public');
 const DB_PATH = process.env.DB_PATH || path.join(ROOT, 'db.json');
 
 /* ---------------- datastore ----------------
-   Two backends:
-   - JSON file (default, zero-config — great for local dev)
-   - PostgreSQL when DATABASE_URL is set (Railway + Neon, production)
+   Three backends, selected by environment at startup:
+   - Supabase   when SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are set (production)
+                tables + cover Storage; secrets stay server-side only
+   - PostgreSQL when DATABASE_URL is set
+   - JSON file  (default, zero-config — local dev)
    All route handlers work against the same in-memory `db` object either way. */
-const USE_PG = !!process.env.DATABASE_URL;
+const USE_SUPABASE = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+const USE_PG = !USE_SUPABASE && !!process.env.DATABASE_URL;
 const COLLECTIONS = ['users', 'sessions', 'genres', 'novels', 'chapters', 'bookmarks', 'history', 'follows', 'verifications', 'reports'];
 let db;
 let pgPool = null;
+let supabase = null;
 let persistChain = Promise.resolve();
 
 function saveDB() {
-  if (!USE_PG) { fs.writeFileSync(DB_PATH, JSON.stringify(db)); return; }
   // Serialize writes so concurrent saves never interleave.
+  if (USE_SUPABASE) { persistChain = persistChain.then(persistAllSupabase).catch(e => console.error('[db] persist error:', e.message)); return; }
+  if (!USE_PG) { fs.writeFileSync(DB_PATH, JSON.stringify(db)); return; }
   persistChain = persistChain.then(persistAll).catch(e => console.error('[db] persist error:', e.message));
 }
 
@@ -307,12 +312,14 @@ route('GET', '/api/novels/(?<id>[^/]+)', ({ res, params, user }) => {
 route('POST', '/api/novels', ({ res, body, user }) => {
   const title = String(body.title || '').trim();
   if (title.length < 2) throw httpError(400, 'Title is required');
+  if (body.rightsConfirmed !== true) throw httpError(400, 'You must confirm you have the rights to publish this content');
   const genres = Array.isArray(body.genres) ? body.genres.map(g => String(g).trim()).filter(Boolean).slice(0, 5) : [];
   const n = {
     id: uid(), authorId: user.id, title,
     description: String(body.description || '').slice(0, 2000),
     genres, cover: body.cover ? String(body.cover).slice(0, 400000) : '',
-    status: 'published', featured: false, views: 0, createdAt: now()
+    status: 'published', featured: false, views: 0, createdAt: now(),
+    rightsConfirmed: true, rightsConfirmedAt: now()
   };
   db.novels.push(n); saveDB();
   json(res, 200, { novel: enrichNovel(n, user) });
@@ -337,6 +344,7 @@ function deleteNovelHandler({ res, params, user }) {
   const n = novelById(params.id);
   if (!n) throw httpError(404, 'Novel not found');
   if (!canManageNovel(user, n)) throw httpError(403, 'Not allowed');
+  deleteCoverObject(n.cover); // best-effort Supabase Storage cleanup
   db.novels = db.novels.filter(x => x.id !== n.id);
   db.chapters = db.chapters.filter(c => c.novelId !== n.id);
   db.bookmarks = db.bookmarks.filter(b => b.novelId !== n.id);
@@ -349,6 +357,24 @@ route('PUT', '/api/novels/(?<id>[^/]+)', putNovelHandler, { auth: true });
 route('DELETE', '/api/novels/(?<id>[^/]+)', deleteNovelHandler, { auth: true });
 route('PUT', '/api/admin/novels/(?<id>[^/]+)', putNovelHandler, { admin: true });
 route('DELETE', '/api/admin/novels/(?<id>[^/]+)', deleteNovelHandler, { admin: true });
+
+/* ---- cover upload (validated server-side; stored in Supabase Storage when active) ---- */
+const MAX_COVER_BYTES = 5 * 1024 * 1024; // 5 MB
+route('POST', '/api/upload-cover', async ({ res, body, user }) => {
+  const dataUrl = String(body.dataUrl || '');
+  const m = dataUrl.match(/^data:(image\/(jpeg|jpg|png|webp));base64,(.+)$/i);
+  if (!m) throw httpError(400, 'Cover must be a JPG, PNG or WebP image');
+  const buf = Buffer.from(m[3], 'base64');
+  if (!buf.length) throw httpError(400, 'Cover file is empty');
+  if (buf.length > MAX_COVER_BYTES) throw httpError(400, 'Cover exceeds the 5 MB limit');
+  if (!USE_SUPABASE) return json(res, 200, { url: dataUrl }); // JSON/PG backends keep inline data
+  const ext = (m[2].toLowerCase() === 'jpg' ? 'jpeg' : m[2].toLowerCase());
+  const path = user.id + '-' + Date.now() + '.' + (ext === 'jpeg' ? 'jpg' : ext);
+  const { error } = await supabase.storage.from('covers').upload(path, buf, { contentType: 'image/' + ext, upsert: true });
+  if (error) throw httpError(500, 'Cover upload failed: ' + error.message);
+  const { data } = supabase.storage.from('covers').getPublicUrl(path);
+  json(res, 200, { url: data.publicUrl });
+}, { writer: true });
 
 route('POST', '/api/novels/(?<id>[^/]+)/bookmark', ({ res, params, user }) => {
   if (!novelById(params.id)) throw httpError(404, 'Novel not found');
@@ -591,7 +617,7 @@ route('DELETE', '/api/admin/genres/(?<id>[^/]+)', ({ res, params }) => {
 route('GET', '/api/health', ({ res }) => json(res, 200, { ok: true, name: 'SOLID INK NOVEL', time: now() }));
 
 /* ---------------- static ---------------- */
-const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+const MIME = { '.html': 'text/html', '.css': 'text/css', '.js': 'text/javascript', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
 function serveStatic(res, pathname) {
   if (pathname === '/') pathname = '/index.html';
   const fp = path.normalize(path.join(PUB, pathname));
@@ -638,16 +664,69 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+/* ---- Supabase backend (tables + cover Storage) ---- */
+async function persistAllSupabase() {
+  for (const c of COLLECTIONS) {
+    const { error: delErr } = await supabase.from(c).delete().neq('id', '');
+    if (delErr) throw delErr;
+    const rows = rowsOf(c).map(r => ({ id: r.id, data: r.data }));
+    for (let i = 0; i < rows.length; i += 500) {
+      const { error } = await supabase.from(c).upsert(rows.slice(i, i + 500));
+      if (error) throw error;
+    }
+  }
+}
+
+async function initSupabase() {
+  const { createClient } = require('@supabase/supabase-js');
+  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+  // Verify tables exist (schema.sql must be run once in the Supabase SQL Editor)
+  const { error } = await supabase.from('users').select('id').limit(1);
+  if (error) {
+    console.error('[db] Supabase tables missing — run supabase/schema.sql once in the Supabase SQL Editor. (' + error.message + ')');
+    process.exit(1);
+  }
+  db = { sessions: {} };
+  for (const c of COLLECTIONS) {
+    if (c === 'sessions') continue;
+    const { data, error: e2 } = await supabase.from(c).select('data');
+    if (e2) throw e2;
+    db[c] = (data || []).map(x => x.data);
+  }
+  const { data: srows } = await supabase.from('sessions').select('data');
+  (srows || []).forEach(x => { db.sessions[x.data.token] = x.data.userId; });
+  if (!db.users.length) {
+    db = require('./seed').build();
+    await persistAllSupabase();
+    console.log('[seed] seeded Supabase with demo data');
+  } else {
+    console.log('[db] loaded from Supabase: ' + db.users.length + ' users, ' + db.novels.length + ' novels, ' + db.chapters.length + ' chapters');
+  }
+  // Ensure the public covers bucket exists
+  const { error: bErr } = await supabase.storage.createBucket('covers', { public: true });
+  if (bErr && !/already exists|Bucket already exists|already been created/i.test(String(bErr.message))) {
+    console.warn('[storage] could not create covers bucket:', bErr.message);
+  }
+}
+
+function deleteCoverObject(url) {
+  if (!USE_SUPABASE || !url || !url.includes('/covers/')) return;
+  const m = String(url).match(/\/covers\/(.+)$/);
+  if (m) supabase.storage.from('covers').remove([decodeURIComponent(m[1])]).catch(() => {});
+}
+
 async function boot() {
   try {
-    if (USE_PG) await initPG();
+    if (USE_SUPABASE) await initSupabase();
+    else if (USE_PG) await initPG();
     else loadDB();
   } catch (e) {
     console.error('[db] failed to initialize datastore:', e.message);
     process.exit(1);
   }
+  const storageLabel = USE_SUPABASE ? 'Supabase' : USE_PG ? 'PostgreSQL' : 'JSON file';
   server.listen(PORT, '0.0.0.0', () =>
-    console.log(`SOLID INK NOVEL running on http://0.0.0.0:${PORT} (storage: ${USE_PG ? 'PostgreSQL' : 'JSON file'})`));
+    console.log(`SOLID INK NOVEL running on http://0.0.0.0:${PORT} (storage: ${storageLabel})`));
 }
 
 /* Graceful shutdown: flush pending writes before Railway kills the process */

@@ -8,38 +8,49 @@ A modern, **mobile-first novel reading & publishing platform** (MVP).
 node server.js          # → http://localhost:3000
 ```
 
-Requires Node 18+ (`npm install` once — single dependency: `pg`).
-Data persists in `db.json` locally, or in PostgreSQL when `DATABASE_URL` is set
+Requires Node 18+ (`npm install` once — two dependencies: `pg`, `@supabase/supabase-js`).
+Data persists in `db.json` locally, or in PostgreSQL/Supabase when configured
 (auto-seeded on first run either way). To reset local data: delete `db.json` and restart.
 
 ## Storage backends
 
-SOLID INK NOVEL auto-selects its datastore at startup:
+SOLID INK NOVEL auto-selects its datastore at startup (priority order):
 
-| Environment | Storage | How |
+| Environment | Storage | Notes |
 |---|---|---|
-| No `DATABASE_URL` | `db.json` file | zero-config, ideal for local dev |
-| `DATABASE_URL` set | **PostgreSQL** | recommended for production (e.g. free Neon.tech DB on Railway) |
+| `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` | **Supabase** | tables + book-cover Storage — recommended |
+| `DATABASE_URL` set | PostgreSQL | any managed Postgres (e.g. Neon) |
+| Neither | `db.json` file | zero-config, ideal for local dev |
 
 On first boot an empty database is seeded with the demo library automatically.
-PostgreSQL restarts/redeploys never lose data.
+**Secret keys live only on the backend** (Railway variables) — the frontend never sees them.
 
-## Deploying: Railway (host) + Neon (free database)
+### Supabase setup (free tier)
+
+1. Create a free project at https://supabase.com.
+2. **SQL Editor → New query** → paste the contents of `supabase/schema.sql` → **Run**.
+   This creates the 10 app tables with locked-down RLS and the public `covers` bucket.
+3. Copy **Project URL** and the **service_role** key (Settings → API).
+4. On Railway set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` → redeploy.
+
+Covers are uploaded through the backend (validated: JPG/PNG/WebP, max **5 MB**)
+and stored in Supabase Storage; novels, chapters and user data live in Supabase tables.
+
+## Deploying: Railway (host) + Supabase (free database)
 
 The app is Railway-ready out of the box (reads `$PORT`, binds `0.0.0.0`, zero build step).
 
-1. **Neon** — sign up free at https://neon.tech → create a project → copy the
-   connection string (Dashboard → *Connect*).
-2. **Railway** — New Project → Deploy from GitHub repo → select this repository.
+1. **Railway** — New Project → Deploy from GitHub repo → select this repository.
    Start Command: `node server.js` (no build command needed).
-3. **Railway → Variables** → add `DATABASE_URL` = your Neon connection string.
-4. **Settings → Networking → Generate Domain** for your public URL.
+2. **Railway → Variables** → add `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`
+   (run `supabase/schema.sql` in Supabase first — see above).
+3. **Settings → Networking → Generate Domain** for your public URL.
 
-That's it — stories posted by any user are stored in Neon and visible to everyone,
+Stories posted by any user are stored in Supabase and visible to everyone,
 surviving every restart and redeploy.
 
-> Alternative (no external DB): mount a Railway Volume at `/data` and set
-> `DB_PATH=/data/db.json` to persist the JSON file instead.
+> Alternatives: PostgreSQL via `DATABASE_URL` (e.g. free Neon.tech), or a Railway
+> Volume at `/data` with `DB_PATH=/data/db.json` for the JSON store.
 
 ## Demo accounts (password for all: `demo123`)
 
@@ -60,11 +71,14 @@ surviving every restart and redeploy.
 - Novel page: cover, synopsis, genres, author profile + verified badge, chapter list, follow/bookmark
 - Distraction-free chapter reader: Paper / Sepia / Night themes, font-size controls, prev/next, chapter list
 - Bookmarks + automatic reading history with "Continue reading"
-- Follow writers; report novels/chapters
+- Follow writers; report novels/chapters (incl. copyright concerns)
+- **Offline downloads**: ⬇ any novel to the device (IndexedDB), read in the *Downloaded* section with no internet
+- **Installable PWA**: add to home screen, works offline
 
 **Writers** (`Join as a Writer` in the main menu)
 - Separate writer dashboard with stats
-- Create/manage novels: cover upload (auto-resized), title, description, multi-genre
+- Create/manage novels: cover upload (**JPG/PNG/WebP, max 5 MB**, validated client + server-side), title, description, multi-genre
+- **Copyright attestation**: writers must confirm they hold the rights to publish before creating a novel
 - Built-in rich-text editor (bold/italic/headings/quotes/lists), word count
 - Save drafts, publish/unpublish, edit and delete chapters
 
@@ -72,23 +86,29 @@ surviving every restart and redeploy.
 - Verified ✓ badge shown across the app
 - Writers submit verification requests; only admins approve/reject
 
-**Admin**
+**Admin / moderation**
 - Overview stats, user management (roles, ban, manual verify), verification queue,
-  novel moderation (feature/hide/delete), chapter moderation, genre management,
-  and reported-content queue (dismiss or remove content)
+  novel moderation (feature/hide/delete), chapter moderation, genre management
+- **Reports queue**: reader reports (incl. copyright) with dismiss / remove-content actions,
+  hiding or deleting problematic novels/chapters, and banning problematic accounts
 
 ## Architecture
 
 ```
-server.js   HTTP server: static files + REST API (/api/*); JSON file or PostgreSQL datastore
-seed.js     demo dataset (users, novels, chapters, follows, reports…)
-db.json     local JSON datastore (created automatically when DATABASE_URL is absent)
-public/     SPA frontend (hash router, vanilla JS — no build step)
+server.js            HTTP server: static files + REST API (/api/*); Supabase/PostgreSQL/JSON datastore
+seed.js              demo dataset (users, novels, chapters, follows, reports…)
+db.json              local JSON datastore (created automatically when no DB env is set)
+supabase/schema.sql  one-time Supabase setup (tables + covers bucket)
+public/              SPA frontend (hash router, vanilla JS — no build step)
+public/sw.js         service worker (PWA, offline caching)
+public/manifest.webmanifest  PWA manifest (install + icons)
+public/icons/        app icons (192/512, incl. maskable)
 ```
 
-The datastore layer is isolated inside `server.js` (`db`, `saveDB`) so it can be
-swapped for Postgres/Mongo without touching route handlers. API responses are
-plain JSON, ready for a future mobile app.
+The datastore layer is isolated inside `server.js` (`db`, `saveDB`), so backends
+are swappable without touching route handlers. Cover uploads and all Supabase
+calls happen server-side only; the service_role key is never exposed to the
+browser. API responses are plain JSON, ready for a future native mobile app.
 
 ## Future-proofing hooks (not yet implemented)
 
